@@ -1,0 +1,7 @@
+# Private workspace (separate git repo, never published)
+.private/
+CLAUDE.local.md
+
+# Dependencies and run output
+node_modules/
+artifacts/

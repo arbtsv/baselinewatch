@@ -1,0 +1,9 @@
+* text=auto
+
+# Shell hooks must keep LF on every platform
+.githooks/* text eol=lf
+*.sh text eol=lf
+
+# Windows batch files need CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
