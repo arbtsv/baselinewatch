@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hook-tests:
+    name: hook-tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node --test "test/hook/*.test.mjs"
+
+  # Denylist check of everything a pull request publishes. The denylist comes
+  # from a secret; the log shows only pass or fail, never terms or matches.
+  # Pull requests from forks get no secret and fail by design.
+  leak-grep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Check tree, commits and pull request text
+        env:
+          DENYLIST: ${{ secrets.LEAK_DENYLIST }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          RANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RANGE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set +x +o pipefail
+          export LC_ALL=C.UTF-8
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s\n' "$DENYLIST" |
+            sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+            grep -v -e '^#' -e '^$' >"$tmp/terms" || true
+          if [ ! -s "$tmp/terms" ]; then
+            echo "fail: the denylist secret is missing or empty"
+            exit 1
+          fi
+
+          git ls-files -z | xargs -0 cat -- >"$tmp/tree"
+          git ls-files >"$tmp/paths"
+          if [ -n "$RANGE_BASE" ] && [ "$RANGE_BASE" != 0000000000000000000000000000000000000000 ]; then
+            range="$RANGE_BASE..$RANGE_HEAD"
+          else
+            range="$RANGE_HEAD"
+          fi
+          git log --format='%B%n%an <%ae>%n%cn <%ce>' "$range" >"$tmp/commits"
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" >"$tmp/pr-text"
+
+          status=pass
+          for part in tree paths commits pr-text; do
+            if grep -F -i -q -a -f "$tmp/terms" "$tmp/$part"; then
+              echo "fail: $part"
+              status=fail
+            fi
+          done
+          echo "$status"
+          [ "$status" = pass ]
+
+  # The newest marker comment from a maintainer must name the head commit.
+  # The public-pr skill posts it from the pre-push hook's verdict file.
+  leak-marker:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Find the marker for the head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          marker=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '
+            .[]
+            | select(.author_association == "OWNER" or .author_association == "MEMBER"
+                     or .author_association == "COLLABORATOR")
+            | .body | gsub("\\s+$"; "")
+            | select(test("^Leak review: (clean|override) at [0-9a-f]{40}$"))' | tail -n 1)
+          if [ -z "$marker" ]; then
+            echo "fail: no leak-review marker from a maintainer"
+            exit 1
+          fi
+          sha=${marker##* }
+          if [ "$sha" != "$HEAD_SHA" ]; then
+            echo "fail: the newest marker names $sha, the head is $HEAD_SHA"
+            exit 1
+          fi
+          echo "pass: $marker"
