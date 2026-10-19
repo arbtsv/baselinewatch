@@ -26,6 +26,24 @@ jobs:
           node-version: 24
       - run: node --test "test/hook/*.test.mjs"
 
+  unit-tests:
+    name: unit-tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   # Denylist check of everything a pull request publishes. The denylist comes
   # from a secret; the log shows only pass or fail, never terms or matches.
   # Pull requests from forks get no secret and fail by design.
