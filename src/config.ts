@@ -21,9 +21,12 @@ export const POLICY = {
 } as const;
 
 // Browser launch arguments that keep monitoring traffic off the system proxy: the browser connects
-// to the portal directly. So far this is checked only by hand, on a machine that has a system
-// proxy configured.
-export const DIRECT_CONNECTION_ARGS: readonly string[] = ['--no-proxy-server'];
+// to the portal directly. An explicit direct proxy makes Chromium connect to every host directly
+// and takes precedence over the operating system's proxy settings. The no-proxy switch looks
+// equivalent but did not override a Windows system proxy, so it is not used. Playwright's own proxy
+// launch option is not used for this either. Loopback addresses bypass system proxies anyway, so
+// the effect is checked by test/e2e/system-proxy.spec.ts on a machine where a system proxy applies.
+export const DIRECT_CONNECTION_ARGS: readonly string[] = ['--proxy-server=direct://'];
 
 export type MonitorConfigOptions = {
   /** Path of env.json, relative to rootDir unless absolute. Default: "env.json". */

@@ -197,9 +197,10 @@ describe('buildMonitorConfig: fixed run policy', () => {
   });
 
   test('the browser connects directly, without the system proxy', () => {
-    assert.deepEqual(DIRECT_CONNECTION_ARGS, ['--no-proxy-server']);
-    assert.deepEqual(built.use?.launchOptions?.args, ['--no-proxy-server']);
+    assert.deepEqual(DIRECT_CONNECTION_ARGS, ['--proxy-server=direct://']);
+    assert.deepEqual(built.use?.launchOptions?.args, ['--proxy-server=direct://']);
     assert.notEqual(built.use?.launchOptions?.args, DIRECT_CONNECTION_ARGS, 'the config gets its own copy');
+    assert.equal(built.use?.proxy, undefined, "the switch is a launch argument, not Playwright's proxy option");
   });
 
   test('output goes under the manual run and the only reporter is html that never opens', () => {
