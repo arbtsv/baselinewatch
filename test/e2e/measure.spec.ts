@@ -2,6 +2,7 @@
 // measure contract end to end, through the packed core.
 //
 // Run: npm run e2e -- test/e2e/measure.spec.ts
+import zlib from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import {
   demoEnv,
@@ -30,6 +31,51 @@ function expectOnePng(item: JsonTest): void {
   expect(shot.body).toBeTruthy();
   const bytes = Buffer.from(shot.body as string, 'base64');
   expect([...bytes.subarray(0, 4)]).toEqual(PNG_SIGNATURE);
+}
+
+/** Counts the pixels of the mask colour (#FF00FF) in the screenshot attachment of a test. */
+function maskPixels(item: JsonTest): number {
+  const [shot] = screenshots(item) as [JsonTest['attachments'][number]];
+  const png = Buffer.from(shot.body as string, 'base64');
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  const channels = png[25] === 6 ? 4 : 3;
+  const parts: Buffer[] = [];
+  for (let offset = 8; offset < png.length; ) {
+    const length = png.readUInt32BE(offset);
+    if (png.toString('latin1', offset + 4, offset + 8) === 'IDAT') parts.push(png.subarray(offset + 8, offset + 8 + length));
+    offset += 12 + length;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(parts));
+  const stride = width * channels;
+  let previous = Buffer.alloc(stride);
+  let count = 0;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)] as number;
+    const line = Buffer.from(raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)));
+    for (let i = 0; i < stride; i++) {
+      const left = i >= channels ? (line[i - channels] as number) : 0;
+      const up = previous[i] as number;
+      const upLeft = i >= channels ? (previous[i - channels] as number) : 0;
+      let add = 0;
+      if (filter === 1) add = left;
+      else if (filter === 2) add = up;
+      else if (filter === 3) add = (left + up) >> 1;
+      else if (filter === 4) {
+        const guess = left + up - upLeft;
+        const dl = Math.abs(guess - left);
+        const du = Math.abs(guess - up);
+        const dul = Math.abs(guess - upLeft);
+        add = dl <= du && dl <= dul ? left : du <= dul ? up : upLeft;
+      }
+      line[i] = ((line[i] as number) + add) & 0xff;
+    }
+    for (let x = 0; x < width; x++) {
+      if (line[x * channels] === 255 && line[x * channels + 1] === 0 && line[x * channels + 2] === 255) count++;
+    }
+    previous = line;
+  }
+  return count;
 }
 
 async function onlyTest(args: string[]): Promise<JsonTest> {
@@ -64,6 +110,33 @@ test('measure a metric that has no baseline', async ({ page, measure }) => {
   await measure('unknown_ms', async () => {
     throw new Error('fn-was-called');
   });
+});
+`;
+
+const SECRET_VALUE = 'secret-value-not-real-4711';
+
+const FILL_SECRET_SOURCE = `import { test } from 'baselinewatch';
+
+test('fill a field with a secret', async ({ page, fillSecret }) => {
+  await page.goto('/');
+  await fillSecret(page.getByLabel('Login'), '${SECRET_VALUE}');
+});
+`;
+
+const PLAIN_FILL_SOURCE = `import { test } from 'baselinewatch';
+
+test('fill a field without any mask', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Login').fill('${SECRET_VALUE}');
+});
+`;
+
+// A heading is not editable, so the fill is refused at once; the registration must still count.
+const FILL_SECRET_FAILS_SOURCE = `import { test } from 'baselinewatch';
+
+test('fill a target that refuses the fill', async ({ page, fillSecret }) => {
+  await page.goto('/');
+  await fillSecret(page.getByRole('heading', { name: 'Sign in' }), '${SECRET_VALUE}');
 });
 `;
 
@@ -149,6 +222,53 @@ test('a slow step gives one slow error and still one screenshot', async () => {
     expect(item.errors).toHaveLength(1);
     expect(item.errors[0]).toMatch(/^(?:Error: )?\[slow\] /);
     expectOnePng(item);
+  } finally {
+    await portal.stop();
+  }
+});
+
+test('fillSecret masks the filled field in the one screenshot and keeps the value out of the report', async () => {
+  const portal = await startPortal('ok');
+  try {
+    const env = await demoEnv({}, { scenarios: { 'e2e-secret': { 'node-1': portal.url } } });
+    const run = await withScenario('e2e-secret', FILL_SECRET_SOURCE, () =>
+      withDemoEnv(env, () => runDemoPlaywright(['test', '--reporter=json'])),
+    );
+    expect(run.timedOut).toBe(false);
+    const item = parseJsonReport(run).tests[0] as JsonTest;
+    expect(item.status).toBe('passed');
+    expectOnePng(item);
+    expect(maskPixels(item)).toBeGreaterThan(0);
+    expect(run.stdout).not.toContain(SECRET_VALUE);
+  } finally {
+    await portal.stop();
+  }
+});
+
+test('a plain fill leaves the screenshot without mask pixels', async () => {
+  const portal = await startPortal('ok');
+  try {
+    const env = await demoEnv({}, { scenarios: { 'e2e-plainfill': { 'node-1': portal.url } } });
+    const item = await withScenario('e2e-plainfill', PLAIN_FILL_SOURCE, () => withDemoEnv(env, () => onlyTest([])));
+    expect(item.status).toBe('passed');
+    expectOnePng(item);
+    expect(maskPixels(item)).toBe(0);
+  } finally {
+    await portal.stop();
+  }
+});
+
+test('fillSecret registers the mask before a fill that fails, and the one screenshot still shows it', async () => {
+  const portal = await startPortal('ok');
+  try {
+    const env = await demoEnv({}, { scenarios: { 'e2e-secretfail': { 'node-1': portal.url } } });
+    const item = await withScenario('e2e-secretfail', FILL_SECRET_FAILS_SOURCE, () =>
+      withDemoEnv(env, () => onlyTest([])),
+    );
+    expect(item.status).toBe('failed');
+    expect(item.errors.length).toBeGreaterThan(0);
+    expectOnePng(item);
+    expect(maskPixels(item)).toBeGreaterThan(0);
   } finally {
     await portal.stop();
   }

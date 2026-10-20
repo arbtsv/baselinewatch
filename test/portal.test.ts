@@ -138,6 +138,40 @@ async function timedGet(base: string, pathname: string, cookie: string | null): 
   return performance.now() - started;
 }
 
+describe('body size limit', () => {
+  let portal: RunningPortal;
+  let account: { login: string; password: string };
+
+  before(async () => {
+    account = (await loadPortalModule()).DEMO_ACCOUNT;
+    portal = await startPortal('ok');
+  });
+  after(async () => {
+    await portal?.stop();
+  });
+
+  test('a body over 10 KB is answered with 413 and the portal keeps serving', async () => {
+    const response = await fetch(new URL('/login', portal.url), {
+      method: 'POST',
+      body: new URLSearchParams({ login: account.login, password: 'x'.repeat(12 * 1024) }),
+      redirect: 'manual',
+    });
+    assert.equal(response.status, 413);
+    assert.deepEqual(response.headers.getSetCookie(), []);
+    await response.text();
+
+    const after413 = await signIn(portal.url, account.login, account.password);
+    assert.equal(after413.status, 303);
+    assert.equal(after413.location, '/home');
+  });
+
+  test('a body just under the limit is still read', async () => {
+    const result = await signIn(portal.url, account.login, 'x'.repeat(9 * 1024));
+    assert.equal(result.status, 200);
+    assert.match(result.html, /role="alert"/);
+  });
+});
+
 describe('slowOnce mode', () => {
   let portal: RunningPortal;
   let portalModule: PortalModule;
