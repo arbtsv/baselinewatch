@@ -10,7 +10,8 @@ report, CSV history and exit codes for a scheduler. Status: early development.
 - Use only invented examples: the demo portal, `example.com`, `*.test`,
   placeholder credentials. Never reproduce text, ids, hosts or screenshots of a
   real application.
-- Write committed files in English. `README.ru.md` is the only Russian file.
+- Write committed files in English. The only Russian text is `README.ru.md`,
+  `src/i18n/ru.ts` (the Russian report strings) and the tests that expect that output.
 - Stage explicit paths. Never `git add -A`, `git add .` or `git add -f`.
   `.private/` and `CLAUDE.local.md` are ignored on purpose.
 - Push only with the `public-pr` skill. Never `--no-verify`, never set
