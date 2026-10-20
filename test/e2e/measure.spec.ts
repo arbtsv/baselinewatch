@@ -227,7 +227,7 @@ test('a slow step gives one slow error and still one screenshot', async () => {
   }
 });
 
-test('fillSecret masks the filled field in the one screenshot and keeps the value out of the report', async () => {
+test('fillSecret masks the filled field in the one screenshot', async () => {
   const portal = await startPortal('ok');
   try {
     const env = await demoEnv({}, { scenarios: { 'e2e-secret': { 'node-1': portal.url } } });
@@ -239,6 +239,7 @@ test('fillSecret masks the filled field in the one screenshot and keeps the valu
     expect(item.status).toBe('passed');
     expectOnePng(item);
     expect(maskPixels(item)).toBeGreaterThan(0);
+    // Only the JSON reporter is visible here and it does not list the fill step; the html report is outside this check.
     expect(run.stdout).not.toContain(SECRET_VALUE);
   } finally {
     await portal.stop();
