@@ -35,6 +35,11 @@ Allowed without question: this document's own wording, generic engineering
 language, the demo portal, and trailers that tools add to commit messages (for
 example `Co-Authored-By:` and session links).
 
+Language: committed files are in English. The exceptions are `README.ru.md`,
+`src/i18n/ru.ts` (the Russian strings of the report and the console) and tests
+that expect that Russian output. Russian text in those files is expected and is
+not a finding by itself; the rules above apply to it as to any other text.
+
 ## How it is enforced
 
 **Private workspace.** Plans, drafts and the private denylist live in `.private/`,
