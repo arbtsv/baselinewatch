@@ -5,3 +5,11 @@ CLAUDE.local.md
 # Dependencies and run output
 node_modules/
 artifacts/
+
+# Build output, the demo project's local install and e2e output
+dist/
+/examples/demo-portal/vendor/
+/examples/demo-portal/package-lock.json
+/examples/demo-portal/scenarios/e2e-*.spec.ts
+test-results/
+playwright-report/

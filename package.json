@@ -1,0 +1,39 @@
+{
+  "name": "baselinewatch",
+  "version": "0.1.0",
+  "description": "Baseline-driven synthetic monitoring for Playwright",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "templates/",
+    "README*.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@playwright/test": ">=1.61 <2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24",
+    "typescript": "7.0.2"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "demo:prepare": "node scripts/prepare-demo.mjs",
+    "e2e": "node scripts/prepare-demo.mjs && playwright test"
+  }
+}
