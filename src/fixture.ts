@@ -2,7 +2,13 @@
 // measure and fillSecret fixtures, and the end-of-test check that turns slow steps into one error.
 import { test as base, expect, type Locator } from '@playwright/test';
 import { loadEnv, type Account } from './env.ts';
-import { createMeasure, finishMessage, type Measure, type MeasureSession } from './measure.ts';
+import {
+  createMeasure,
+  finishMessage,
+  RETRY_GUARD_MESSAGE,
+  type Measure,
+  type MeasureSession,
+} from './measure.ts';
 import {
   FINISH_FIXTURE_TIMEOUT_MS,
   METRIC_ANNOTATION,
@@ -43,6 +49,7 @@ type TestState = {
 
 type InternalFixtures = {
   blwTestState: TestState;
+  blwRetryGuard: void;
   blwFinish: void;
 };
 
@@ -100,15 +107,26 @@ export const test = base.extend<
     await use(session.measure);
   },
 
+  // A repeated sign-in can lock the account, so a retry requested on the command line stops here, in
+  // fixture setup, before the test body runs.
+  blwRetryGuard: [
+    async ({}, use, testInfo) => {
+      if (testInfo.retry > 0) throw new Error(RETRY_GUARD_MESSAGE);
+      await use();
+    },
+    { auto: true },
+  ],
+
   blwFinish: [
     async ({ page, blwTestState }, use, testInfo) => {
       await use();
-      // A failed screenshot is an ordinary test error and wins over the slow message; the slow
-      // verdicts stay in the annotations. Only the default page is captured.
+      // A failed screenshot is an ordinary test error. The slow error is added only to a test that
+      // would otherwise pass, so a failed test never carries it; the slow verdicts stay in the
+      // annotations either way. Only the default page is captured.
       const body = await page.screenshot(screenshotOptions(blwTestState.masks));
       await testInfo.attach(SCREENSHOT_ATTACHMENT, { body, contentType: 'image/png' });
       const slow = finishMessage(blwTestState.session ? blwTestState.session.slowMessages() : []);
-      if (slow !== undefined) throw new Error(slow);
+      if (slow !== undefined && testInfo.status === testInfo.expectedStatus) throw new Error(slow);
     },
     { auto: true, timeout: FINISH_FIXTURE_TIMEOUT_MS },
   ],

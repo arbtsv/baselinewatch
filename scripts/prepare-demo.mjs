@@ -1,8 +1,10 @@
 // Prepares the in-repo demo project: rebuilds the core, packs it into
 // examples/demo-portal/vendor/ and installs that tarball into the demo project,
 // the same way an integrator consumes it (a vendored tgz plus a Playwright peer
-// dependency). When the packed bytes did not change since the last install the
-// install is skipped. It also writes examples/demo-portal/env.json when missing.
+// dependency). The install is skipped only when the packed bytes did not change
+// since the last install and every file of dist/ equals its installed copy; a
+// stale install is removed and redone. It also writes examples/demo-portal/env.json
+// when missing.
 //
 // Run: node scripts/prepare-demo.mjs
 import { createHash } from 'node:crypto';
@@ -108,6 +110,19 @@ function checkManifest(fileName) {
   }
 }
 
+/** True when every file of dist/ exists in the installed copy of the core with identical bytes. */
+function installedMatchesDist() {
+  const source = path.join(ROOT, 'dist');
+  const target = path.join(DEMO, 'node_modules', 'baselinewatch', 'dist');
+  for (const relative of listFiles(source)) {
+    const copy = path.join(target, relative);
+    if (!fs.existsSync(copy) || !fs.readFileSync(copy).equals(fs.readFileSync(path.join(source, relative)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function installIfChanged(fileName) {
   const tgzBytes = fs.readFileSync(path.join(VENDOR, fileName));
   const hash = sha256(tgzBytes);
@@ -115,29 +130,27 @@ function installIfChanged(fileName) {
   const installed =
     fs.existsSync(path.join(DEMO, 'node_modules', 'baselinewatch', 'package.json')) &&
     fs.existsSync(path.join(DEMO, 'node_modules', '@playwright', 'test', 'package.json'));
-  if (stamped === hash && installed) {
+  // The stamp only says which tarball was installed last; the bytes decide whether the copy is current.
+  if (stamped === hash && installed && installedMatchesDist()) {
     log('core unchanged, install skipped');
     return;
   }
   const savedManifest = fs.readFileSync(DEMO_PACKAGE);
+  fs.rmSync(STAMP, { force: true });
+  // npm keeps a copy of the same name and version, so an old core has to be removed first.
+  fs.rmSync(path.join(DEMO, 'node_modules', 'baselinewatch'), { recursive: true, force: true });
   log(`installing ./vendor/${fileName} into examples/demo-portal`);
   npm(['install', `./vendor/${fileName}`, '--no-audit', '--no-fund'], DEMO);
   if (!fs.readFileSync(DEMO_PACKAGE).equals(savedManifest)) {
     fs.writeFileSync(DEMO_PACKAGE, savedManifest);
   }
-  fs.writeFileSync(STAMP, `${hash}\n`);
-  log('installed');
-}
-
-function checkFreshInstall() {
-  const source = path.join(ROOT, 'dist');
-  const target = path.join(DEMO, 'node_modules', 'baselinewatch', 'dist');
-  for (const relative of listFiles(source)) {
-    const copy = path.join(target, relative);
-    if (!fs.existsSync(copy) || !fs.readFileSync(copy).equals(fs.readFileSync(path.join(source, relative)))) {
-      fail('the demo still has an old core installed');
-    }
+  if (!installedMatchesDist()) {
+    fail(
+      'the demo still has an old core installed; delete examples/demo-portal/node_modules/baselinewatch ' +
+        'and examples/demo-portal/vendor/.stamp, then run npm run demo:prepare again',
+    );
   }
+  fs.writeFileSync(STAMP, `${hash}\n`);
   log('installed core matches dist/');
 }
 
@@ -163,7 +176,6 @@ try {
   const fileName = buildAndPack();
   checkManifest(fileName);
   installIfChanged(fileName);
-  checkFreshInstall();
   await writeEnvIfMissing();
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));

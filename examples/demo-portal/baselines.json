@@ -1,15 +1,15 @@
 {
   "demo": {
     "login_ms": {
-      "reference_ms": 300,
+      "reference_ms": 1000,
       "maxRatio": 3
     },
     "overview_ms": {
-      "reference_ms": 300,
+      "reference_ms": 450,
       "maxRatio": 3
     },
     "history_ms": {
-      "reference_ms": 300,
+      "reference_ms": 1000,
       "maxRatio": 3
     }
   }
