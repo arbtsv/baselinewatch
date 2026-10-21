@@ -6,9 +6,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  BROWSER_PROBE_TIMEOUT_MS,
   checkBrowser,
   checkPlaywrightCopies,
   checkProjectFiles,
+  probeChromium,
   runPrechecks,
   type PrecheckDeps,
 } from '../src/precheck.ts';
@@ -313,6 +315,55 @@ describe('checkBrowser', () => {
     });
     // Existence is not asserted: unit runners may have no browsers installed.
     assert.ok(path.basename(named).startsWith('chrome-headless-shell'), `named: ${named}`);
+  });
+});
+
+describe('probeChromium', () => {
+  function launcher(launch: 'resolve' | 'reject', close: 'resolve' | 'reject' = 'resolve') {
+    const calls = { launchOptions: [] as Array<{ headless: boolean; timeout: number }>, closed: 0 };
+    return {
+      calls,
+      chromium: {
+        launch: async (options: { headless: boolean; timeout: number }) => {
+          calls.launchOptions.push(options);
+          if (launch === 'reject') throw new Error('browser missing');
+          return {
+            close: async () => {
+              calls.closed += 1;
+              if (close === 'reject') throw new Error('close failed');
+            },
+          };
+        },
+      },
+    };
+  }
+
+  test('a launch that fails is a missing browser and nothing is closed', async () => {
+    const fake = launcher('reject');
+    assert.equal(await probeChromium(fake.chromium, BROWSER_PROBE_TIMEOUT_MS), false);
+    assert.equal(fake.calls.closed, 0);
+  });
+
+  test('a launch that works is an installed browser and the browser is closed once', async () => {
+    const fake = launcher('resolve');
+    assert.equal(await probeChromium(fake.chromium, BROWSER_PROBE_TIMEOUT_MS), true);
+    assert.equal(fake.calls.closed, 1);
+  });
+
+  test('a close that fails does not turn a launched browser into a missing one', async () => {
+    const fake = launcher('resolve', 'reject');
+    assert.equal(await probeChromium(fake.chromium, BROWSER_PROBE_TIMEOUT_MS), true);
+    assert.equal(fake.calls.closed, 1);
+  });
+
+  test('the launch is headless and carries the time limit', async () => {
+    assert.equal(BROWSER_PROBE_TIMEOUT_MS, 30_000);
+    const fake = launcher('resolve');
+    await probeChromium(fake.chromium, BROWSER_PROBE_TIMEOUT_MS);
+    assert.deepEqual(fake.calls.launchOptions, [{ headless: true, timeout: 30_000 }]);
+    const other = launcher('resolve');
+    await probeChromium(other.chromium, 1234);
+    assert.deepEqual(other.calls.launchOptions, [{ headless: true, timeout: 1234 }]);
   });
 });
 
