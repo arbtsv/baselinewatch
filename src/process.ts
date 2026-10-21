@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { stripAnsi } from './classify.ts';
 import { GLOBAL_TIMEOUT_MS, WATCHDOG_GRACE_MS } from './protocol.ts';
 
 /** How a pass ended, as far as the process goes; the verdict comes from the pass file alone. */
@@ -53,6 +54,17 @@ export function taskkillPath(env: NodeJS.ProcessEnv = process.env): string {
   return path.win32.join(systemRoot, 'System32', 'taskkill.exe');
 }
 
+// Every control character except the tab: C0 without U+0009, delete and the C1 block.
+const CONTROL_CHARACTERS = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g;
+
+/**
+ * A line of child output as the console may show it: escape sequences removed whole (so no fragment of
+ * one is printed), then every remaining control character except the tab. Multi-byte characters stay.
+ */
+export function printableLine(line: string): string {
+  return stripAnsi(line).replace(CONTROL_CHARACTERS, '');
+}
+
 /**
  * Splits text that arrives in chunks into lines. A line leaves without its line end and without a
  * carriage return in front of it; what is left over when the stream ends leaves as a last line. A print
@@ -63,7 +75,7 @@ export function createLineRelay(print: (line: string) => void): { push(chunk: st
   let pending = '';
   const emit = (line: string): void => {
     try {
-      print(line);
+      print(printableLine(line));
     } catch {
       // The line is lost; the pass and the lines after it go on.
     }

@@ -172,7 +172,7 @@ describe('control characters in relayed lines', () => {
 
   test('multi-byte characters pass through', () => {
     // Written with escapes: the test file stays free of non-ASCII text.
-    assert.equal(printableLine('От\tok'), 'От\tok');
+    assert.equal(printableLine('\u041e\u0442\tok'), '\u041e\u0442\tok');
   });
 
   test('the relay prints an inner carriage return removed and still drops a trailing one', () => {
