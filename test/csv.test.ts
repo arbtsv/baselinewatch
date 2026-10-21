@@ -1,7 +1,7 @@
 // Tests for src/csv.ts: the column lists, the rendering of a metric row and a run row, the quoting
 // rule and the append that writes the header once.
 // Run: node --test test/csv.test.ts
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,8 +33,15 @@ function row(overrides: Partial<MetricRow['metric']> = {}): MetricRow {
   };
 }
 
+const created: string[] = [];
+after(() => {
+  for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tempFile(): string {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'blw-csv-')), 'history.csv');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-csv-'));
+  created.push(dir);
+  return path.join(dir, 'history.csv');
 }
 
 describe('column lists', () => {

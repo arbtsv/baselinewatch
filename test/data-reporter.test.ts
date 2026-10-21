@@ -1,7 +1,7 @@
 // Tests for src/reporters/data.ts: the pass file and the CSV history that the data reporter writes.
 // Playwright is not started; the reporter is driven with plain objects shaped like its arguments.
 // Run: node --test test/data-reporter.test.ts
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -90,8 +90,15 @@ function options(dir: string, overrides: Partial<DataReporterOptions> = {}): Dat
   };
 }
 
+const created: string[] = [];
+after(() => {
+  for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function freshDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'blw-data-reporter-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-data-reporter-'));
+  created.push(dir);
+  return dir;
 }
 
 function readPass(file: string): PassFile {

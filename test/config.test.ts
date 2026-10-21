@@ -1,7 +1,7 @@
 // Tests for src/config.ts and src/layout.ts: project construction, the fixed run policy, secrets
 // and configuration errors. Importing src/config.ts loads @playwright/test outside a Playwright run.
 // Run: node --test test/config.test.ts
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -70,8 +70,14 @@ function validBaselines(): object {
   return { demo: { login_ms: { reference_ms: 300, maxRatio: 3 } } };
 }
 
+const created: string[] = [];
+after(() => {
+  for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function makeProject(files: ProjectFiles = {}): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-config-'));
+  created.push(root);
   const env = files.env === undefined ? validEnv() : files.env;
   if (env !== null) fs.writeFileSync(path.join(root, 'env.json'), JSON.stringify(env));
   const baselines = files.baselines === undefined ? validBaselines() : files.baselines;
