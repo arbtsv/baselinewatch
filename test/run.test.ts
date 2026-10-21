@@ -22,6 +22,7 @@ after(() => {
 const FIRST_RUN_ID = '20261020T100000Z';
 const SECOND_RUN_ID = '20261020T100001Z';
 const PROJECTS = ['demo--node-1', 'demo--node-2'];
+const PRINT_MARKER = 'marker-of-the-print';
 const CLEAN_EXIT: PassRun = { status: 0, timedOut: false, interrupted: false };
 
 let rootCounter = 0;
@@ -81,6 +82,8 @@ type Harness = {
   prechecksCalls: number;
   unregistered: number;
   sleeps: number[];
+  /** How many prints threw on purpose. */
+  printFailures: number;
   /** Calls the handler registered through onInterrupt, as a signal would. */
   interrupt: () => void;
   deps: RunDeps;
@@ -91,6 +94,8 @@ function harness(options: {
   prechecks?: { ok: true; value: PrecheckOk } | { ok: false; failure: PrelaunchFailure };
   cliFile?: string;
   root?: string;
+  /** Makes print throw (the first `times` calls) for the lines that `match`; such a line is not recorded. */
+  printFailure?: { match: (line: string) => boolean; times: number };
 }): Harness {
   const made = options.root !== undefined && options.cliFile !== undefined ? { root: options.root, cliFile: options.cliFile } : makeRoot();
   let clock = Date.parse('2026-10-20T10:00:00.000Z');
@@ -103,6 +108,7 @@ function harness(options: {
     prechecksCalls: 0,
     unregistered: 0,
     sleeps: [],
+    printFailures: 0,
     interrupt: () => handler?.(),
     deps: undefined as unknown as RunDeps,
   };
@@ -114,6 +120,11 @@ function harness(options: {
       clock += ms;
     },
     print: (line) => {
+      const failure = options.printFailure;
+      if (failure !== undefined && state.printFailures < failure.times && failure.match(line)) {
+        state.printFailures += 1;
+        throw new Error(PRINT_MARKER);
+      }
       state.lines.push(line);
     },
     prechecks: async () => {
@@ -415,6 +426,74 @@ describe('a history file that cannot be written', () => {
     const summary = readSummary(h.root);
     assert.equal(summary.reason, 'slow');
     assert.ok(summary.warnings.some((warning) => warning.code === 'history_not_written' && warning.pass === undefined));
+  });
+});
+
+describe('an exception after the run is recorded', () => {
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+  const reportLine = (line: string): boolean => line.startsWith('Report: ');
+  const cliErrorLog = (root: string): string => path.join(artifacts(root), 'runs', FIRST_RUN_ID, 'cli-error.log');
+
+  test('a print that throws after the files are written keeps the passing result', async () => {
+    const h = harness({ runPass: cleanPass, printFailure: { match: reportLine, times: 1 } });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(h.printFailures, 1);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.equal(h.lines.at(-2), catalogFor('en').internalError(cliErrorLog(h.root)));
+    assert.ok(!h.lines.includes('REASON=report_not_built'));
+    assert.ok(!h.lines.some((line) => line.startsWith('REASON=')));
+    const summary = readSummary(h.root);
+    assert.equal(summary.status, 'pass');
+    assert.equal(summary.reason, null);
+    const csv = runsCsvLines(h.root);
+    assert.equal(csv.length, 2);
+    assert.ok((csv[1] as string).endsWith(',PASS,0,,9.9.9,1'));
+    assert.ok(fs.readFileSync(cliErrorLog(h.root), 'utf8').includes(PRINT_MARKER));
+  });
+
+  test('the same failing print keeps the reason of a failing run', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, options.pass === 1 ? [project('node-1', 'slow'), project('node-2', 'ok')] : [project('node-1', 'ok')]);
+        return CLEAN_EXIT;
+      },
+      printFailure: { match: reportLine, times: 1 },
+    });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+    assert.equal(runsCsvLines(h.root).length, 2);
+  });
+
+  test('a print that throws on every call does not reject and keeps the exit code', async () => {
+    const h = harness({ runPass: cleanPass, printFailure: { match: () => true, times: Number.POSITIVE_INFINITY } });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(readSummary(h.root).status, 'pass');
+    assert.equal(runsCsvLines(h.root).length, 2);
+  });
+
+  test('a summary.json that cannot be written keeps the row of the run and its result', async () => {
+    const h = harness({
+      runPass: (options) => {
+        // The start of the run has removed the old file; a directory in its place breaks the write.
+        fs.mkdirSync(path.join(artifacts(h.root), 'summary.json'), { recursive: true });
+        return cleanPass(options);
+      },
+    });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    const csv = runsCsvLines(h.root);
+    assert.equal(csv.length, 2);
+    assert.ok((csv[1] as string).includes(',PASS,0,,'));
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.ok(!h.lines.some((line) => line.startsWith('REASON=')));
+    assert.ok(h.lines.includes(catalogFor('en').internalError(cliErrorLog(h.root))));
+    assert.ok(fs.readFileSync(cliErrorLog(h.root), 'utf8').includes('summary.json'));
   });
 });
 
