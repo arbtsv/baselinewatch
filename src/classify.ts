@@ -108,7 +108,8 @@ export function foldCategories(categories: readonly (ErrorCategory | null)[]): E
   return null;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/** True for a plain JSON object: not null and not an array. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 

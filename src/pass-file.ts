@@ -3,8 +3,8 @@
 // validation. Only node:fs and node:path are used; nothing here imports Playwright.
 import fs from 'node:fs';
 import path from 'node:path';
-import { metricRecordOf } from './classify.ts';
-import { MAX_NAME_LENGTH, METRIC_PATTERN, NAME_PATTERN } from './names.ts';
+import { isRecord, metricRecordOf } from './classify.ts';
+import { MAX_NAME_LENGTH, METRIC_PATTERN, nameProblem } from './names.ts';
 import {
   ERROR_CATEGORIES,
   PROJECT_CLASSES,
@@ -69,13 +69,9 @@ export function writeFileAtomic(file: string, text: string): void {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-// A scenario or node name as read from disk: the same ASCII rule the configuration files obey.
+// A scenario or node name as read from disk: the same rule env.json obeys, Windows device names included.
 function isName(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= MAX_NAME_LENGTH && NAME_PATTERN.test(value);
+  return typeof value === 'string' && nameProblem('scenario', value) === undefined;
 }
 
 function isMetricName(value: unknown): value is string {
