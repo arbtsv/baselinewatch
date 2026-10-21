@@ -7,7 +7,6 @@ export const en: Catalog = {
   labelStartedAt: 'Started at',
   labelFinishedAt: 'Finished at',
   labelLocale: 'Locale',
-  labelResult: 'Result',
   colScenario: 'Scenario',
   colNode: 'Node',
   colClass: 'Class',

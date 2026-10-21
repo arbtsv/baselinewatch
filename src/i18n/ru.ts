@@ -9,7 +9,6 @@ export const ru: Catalog = {
   labelStartedAt: 'Начало',
   labelFinishedAt: 'Окончание',
   labelLocale: 'Язык',
-  labelResult: 'Результат',
   colScenario: 'Сценарий',
   colNode: 'Узел',
   colClass: 'Класс',

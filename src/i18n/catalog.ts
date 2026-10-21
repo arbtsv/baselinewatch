@@ -10,7 +10,6 @@ export type Catalog = {
   labelStartedAt: string;
   labelFinishedAt: string;
   labelLocale: string;
-  labelResult: string;
   // Column titles of the table of nodes and metrics.
   colScenario: string;
   colNode: string;

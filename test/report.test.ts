@@ -100,6 +100,23 @@ describe('English report', () => {
     assert.deepEqual(cellsOf(text, 'node-3', 'error'), ['demo', 'node-3', 'error', '-', '-', '-', '-', '-', '-', '-']);
   });
 
+  test('the row of a node without metrics ends with its recheck in the last column', () => {
+    const empty: SummaryNode = { scenario: 'demo', node: 'node-3', class: 'error', metrics: [], recheck: 'error' };
+    const text = renderReport(summaryOf({ nodes: [empty], reason: 'error' }), en);
+    assert.deepEqual(cellsOf(text, 'node-3', 'error'), [
+      'demo',
+      'node-3',
+      'error',
+      '-',
+      '-',
+      '-',
+      '-',
+      '-',
+      '-',
+      'error',
+    ]);
+  });
+
   test('a run without nodes says so instead of printing a table', () => {
     const text = renderReport(summaryOf({ nodes: [], reason: 'report_not_built' }), en);
     assert.ok(text.includes('No node was measured.'));

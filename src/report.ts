@@ -15,12 +15,16 @@ function tableLine(cells: readonly string[], widths: readonly number[]): string 
     .trimEnd();
 }
 
+// Scenario, node, class and recheck: the columns that are not metric columns.
+const NON_METRIC_COLUMNS = 4;
+
 // The rows of one node: one per metric, or a single row with dashes when it measured nothing. The
-// class and the recheck repeat on every row.
-function nodeRows(node: SummaryNode): string[][] {
+// class and the recheck repeat on every row. The row has as many cells as the table has columns.
+function nodeRows(node: SummaryNode, columns: number): string[][] {
   const recheck = node.recheck ?? EMPTY_CELL;
   if (node.metrics.length === 0) {
-    return [[node.scenario, node.node, node.class, ...Array<string>(5).fill(EMPTY_CELL), EMPTY_CELL, recheck]];
+    const dashes = Array<string>(Math.max(columns - NON_METRIC_COLUMNS, 0)).fill(EMPTY_CELL);
+    return [[node.scenario, node.node, node.class, ...dashes, recheck]];
   }
   return node.metrics.map((metric) => [
     node.scenario,
@@ -52,7 +56,7 @@ function tableLines(summary: Summary, catalog: Catalog): string[] {
     catalog.colVerdict,
     catalog.colRecheck,
   ];
-  const rows = [header, ...summary.nodes.flatMap(nodeRows)];
+  const rows = [header, ...summary.nodes.flatMap((node) => nodeRows(node, header.length))];
   const widths = header.map((_, column) => Math.max(...rows.map((row) => (row[column] ?? '').length)));
   return rows.map((row) => tableLine(row, widths));
 }
