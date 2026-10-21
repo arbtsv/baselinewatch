@@ -352,6 +352,37 @@ describe('help and version', () => {
     assert.deepEqual(h.lines, ['baselinewatch 9.9.9']);
     assert.equal(fs.existsSync(artifacts(h.root)), false);
   });
+
+  for (const argv of [['--help'], ['-h'], ['--version'], ['-v']]) {
+    test(`${JSON.stringify(argv)} as the first argument answers with exit 0 and no run`, async () => {
+      const h = harness({});
+      assert.equal(await main(argv, h.deps), 0);
+      assert.ok(h.lines.length > 0);
+      assert.ok(!h.lines.some((line) => line.startsWith('RESULT=')));
+      assert.equal(h.prechecksCalls, 0);
+      assert.equal(h.passCalls.length, 0);
+      assert.equal(fs.existsSync(artifacts(h.root)), false);
+    });
+  }
+
+  test('top-level help and version leave existing run files untouched', async () => {
+    const h = harness({});
+    const files = {
+      'summary.json': '{"sentinel":"summary"}\n',
+      'report.txt': 'sentinel report\n',
+      'runs.csv': 'run_id,result\nsentinel-run,PASS\n',
+    };
+    fs.mkdirSync(artifacts(h.root), { recursive: true });
+    for (const [name, text] of Object.entries(files)) {
+      fs.writeFileSync(path.join(artifacts(h.root), name), text);
+    }
+    assert.equal(await main(['--version'], h.deps), 0);
+    assert.equal(await main(['-h'], h.deps), 0);
+    for (const [name, text] of Object.entries(files)) {
+      assert.equal(fs.readFileSync(path.join(artifacts(h.root), name), 'utf8'), text, name);
+    }
+    assert.equal(fs.existsSync(path.join(artifacts(h.root), 'runs')), false);
+  });
 });
 
 describe('an unexpected failure', () => {

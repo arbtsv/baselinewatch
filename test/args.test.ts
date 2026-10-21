@@ -17,10 +17,24 @@ describe('parseRunArgs', () => {
     assert.deepEqual(parseRunArgs(['run', '--version']), { kind: 'version' });
   });
 
+  test('--help and -h as the first argument ask for the help text', () => {
+    assert.deepEqual(parseRunArgs(['--help']), { kind: 'help' });
+    assert.deepEqual(parseRunArgs(['-h']), { kind: 'help' });
+  });
+
+  test('--version and -v as the first argument ask for the version', () => {
+    assert.deepEqual(parseRunArgs(['--version']), { kind: 'version' });
+    assert.deepEqual(parseRunArgs(['-v']), { kind: 'version' });
+  });
+
+  test('the first argument decides: words after it are ignored', () => {
+    assert.deepEqual(parseRunArgs(['--version', 'extra']), { kind: 'version' });
+    assert.deepEqual(parseRunArgs(['-h', '--bogus']), { kind: 'help' });
+  });
+
   const REJECTED: Array<[string, string[]]> = [
     ['no argument', []],
     ['init', ['init']],
-    ['a bare --help', ['--help']],
     ['another command', ['report']],
     ['an unknown option', ['run', '--bogus']],
     ['a Playwright option', ['run', '--retries=1']],
@@ -31,6 +45,8 @@ describe('parseRunArgs', () => {
     ['a positional after a known option', ['run', '--help', 'extra']],
     ['a positional after the option terminator', ['run', '--', 'extra']],
     ['a short option', ['run', '-h']],
+    ['a short version option under run', ['run', '-v']],
+    ['a value on a top-level --help', ['--help=yes']],
   ];
 
   for (const [name, argv] of REJECTED) {
@@ -68,6 +84,10 @@ describe('USAGE_LINES', () => {
     assert.equal(USAGE_LINES[0], 'Usage: blw run [--help] [--version]');
     assert.ok(USAGE_LINES.some((line) => line.includes('--help')));
     assert.ok(USAGE_LINES.some((line) => line.includes('--version')));
+  });
+
+  test('names the four top-level spellings', () => {
+    assert.ok(USAGE_LINES.some((line) => line.includes('blw --help | -h | --version | -v')));
   });
 
   test('is plain English without machine tokens', () => {

@@ -637,6 +637,42 @@ async function runWithLocale(mode: PortalMode, locale: 'en' | 'ru'): Promise<{ l
   }
 }
 
+test('top-level help and version leave the artifacts alone', async () => {
+  cleanArtifacts();
+  const sentinels: Record<string, string> = {
+    'summary.json': '{"sentinel":"summary"}\n',
+    'report.txt': 'sentinel report\n',
+    'runs.csv': 'run_id,result\nsentinel-run,PASS\n',
+  };
+  fs.mkdirSync(DEMO_ARTIFACTS_DIR, { recursive: true });
+  for (const [name, text] of Object.entries(sentinels)) {
+    fs.writeFileSync(path.join(DEMO_ARTIFACTS_DIR, name), text);
+  }
+  try {
+    const calls: Array<[string[], string]> = [
+      [['--version'], 'baselinewatch '],
+      [['-v'], 'baselinewatch '],
+      [['--help'], 'Usage: blw'],
+      [['-h'], 'Usage: blw'],
+    ];
+    for (const [args, expected] of calls) {
+      const run = await runBlw(args, { cwd: REPO_ROOT });
+      const output = `${run.stdout}\n${run.stderr}`;
+      expect(run.timedOut).toBe(false);
+      expect(run.status, output).toBe(0);
+      const lines = outputLines(run);
+      expect(lines.some((line) => line.startsWith('RESULT=')), output).toBe(false);
+      expect(lines.some((line) => line.startsWith(expected)), output).toBe(true);
+    }
+    for (const [name, text] of Object.entries(sentinels)) {
+      expect(fs.readFileSync(path.join(DEMO_ARTIFACTS_DIR, name), 'utf8'), name).toBe(text);
+    }
+    expect(fs.existsSync(path.join(DEMO_ARTIFACTS_DIR, 'runs'))).toBe(false);
+  } finally {
+    cleanArtifacts();
+  }
+});
+
 test.describe('unwritable history', () => {
   test('a runs.csv that cannot be written leaves the pass verdict intact', async () => {
     cleanArtifacts();

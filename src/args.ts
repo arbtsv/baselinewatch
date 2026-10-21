@@ -1,6 +1,7 @@
-// The arguments of `blw run`. Only the command `run` and the options --help and --version exist;
+// The arguments of `blw`. Only the command `run` and the options --help and --version exist;
 // nothing is ever forwarded to Playwright, so a caller cannot reach a Playwright option such as
-// --retries or --reporter through this command.
+// --retries or --reporter through this command. As the first argument, --help, -h, --version and -v
+// answer on their own and the words after them are ignored; every other problem is a usage problem.
 import { parseArgs } from 'node:util';
 
 export type RunArgs = { kind: 'run' } | { kind: 'help' } | { kind: 'version' } | { kind: 'usage'; problem: string };
@@ -8,6 +9,7 @@ export type RunArgs = { kind: 'run' } | { kind: 'help' } | { kind: 'version' } |
 /** The help text, one line each; English only, because it is printed before any env.json is read. */
 export const USAGE_LINES: readonly string[] = [
   'Usage: blw run [--help] [--version]',
+  '       blw --help | -h | --version | -v',
   '  --help     Show this help and exit',
   '  --version  Print the version of baselinewatch and exit',
 ];
@@ -26,11 +28,20 @@ function usage(problem: string): RunArgs {
   return { kind: 'usage', problem };
 }
 
-/** Parses the whole command line after `blw`: the first word must be `run`. */
+/**
+ * Parses the whole command line after `blw`: the first word is `run`, or one of the four top-level
+ * spellings of help and version.
+ */
 export function parseRunArgs(argv: readonly string[]): RunArgs {
   const [command, ...rest] = argv;
   if (command === undefined) {
     return usage('no command given, expected "run"');
+  }
+  if (command === '--help' || command === '-h') {
+    return { kind: 'help' };
+  }
+  if (command === '--version' || command === '-v') {
+    return { kind: 'version' };
   }
   if (command !== 'run') {
     return usage('unknown command, expected "run"');
