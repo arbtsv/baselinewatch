@@ -300,7 +300,21 @@ test('a secret entered with fillSecret is in no file of the run, html report dat
       withDemoEnv(env, () => runDemoPlaywright(['test'])),
     );
     expect(run.timedOut).toBe(false);
-    expect(fs.existsSync(path.join(DEMO_ARTIFACTS_DIR, 'runs', 'manual', 'pass-1', 'html', 'index.html'))).toBe(true);
+    // The scenario must have reached the fill and failed on the throw; otherwise nothing was entered
+    // and the secret check below would pass for the wrong reason.
+    expect(run.status).not.toBe(0);
+    const passDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', 'manual', 'pass-1');
+    expect(fs.existsSync(path.join(passDir, 'html', 'index.html'))).toBe(true);
+    const snapshots = fs
+      .readdirSync(path.join(passDir, 'test-results'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(passDir, 'test-results', entry.name, 'error-context.md'))
+      .filter((file) => fs.existsSync(file));
+    expect(snapshots).toHaveLength(1);
+    const snapshot = fs.readFileSync(snapshots[0] as string, 'utf8');
+    expect(snapshot).toContain('stop after the fill');
+    // The snapshot lists the password field, and the field is empty.
+    expect(snapshot).toMatch(/textbox "Password"[^\n:]*(?:\n|$)/);
     await expectNoDemoSecrets(run, 'manual', { snapshots: true });
   } finally {
     await portal.stop();

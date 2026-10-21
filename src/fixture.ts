@@ -37,32 +37,37 @@ type PageDocument = {
   getSelection(): { selectAllChildren(node: unknown): void } | null;
 };
 
-/** Runs in the page: empties a form field or an editable element, without any event. */
-function emptyField(element: HTMLElement | SVGElement): void {
-  const field = element as unknown as EditableField;
-  if ('value' in field && typeof field.select === 'function') field.value = '';
-  else if ((element as HTMLElement).isContentEditable) element.textContent = '';
+/** Runs in the page: empties form fields and editable elements, without any event. */
+function emptyFieldsInPage(elements: (HTMLElement | SVGElement)[]): void {
+  for (const element of elements) {
+    const field = element as unknown as EditableField;
+    if ('value' in field && typeof field.select === 'function') field.value = '';
+    else if ((element as HTMLElement).isContentEditable) element.textContent = '';
+  }
 }
 
 /**
  * Playwright writes a snapshot of the page when a test fails, and the snapshot lists the value of every
- * field. The registered fields are emptied once the screenshot is taken, so the snapshot and the html
- * report built from it do not carry what fillSecret entered. A field that is gone is not an error.
+ * field. The fields filled with fillSecret are emptied once the screenshot is taken (or has failed), so
+ * the snapshot and the html report built from it do not carry what fillSecret entered. A field that is
+ * gone is skipped at once, and a failure to empty one never fails the test.
  */
 async function emptyFields(locators: Locator[]): Promise<void> {
   for (const locator of locators) {
     try {
-      await locator.evaluate(emptyField, undefined, { timeout: 1_000 });
+      if ((await locator.count()) > 0) await locator.evaluateAll(emptyFieldsInPage);
     } catch {
-      // The element may have left the page, or the locator may match several elements.
+      // The page may be closing; the test result must not depend on this clean-up.
     }
   }
 }
 
 /**
- * Runs in the page. It enters the text the way Playwright's own fill does (focus, select, insert
- * text), so the page sees ordinary input events. It is passed to evaluate and not to fill because
- * fill puts its argument into the step title, and the step titles end up in the html report.
+ * Runs in the page, after fill('') has waited until the field is visible, enabled and editable and
+ * has refused a target that cannot be filled. It enters the text the way Playwright's own fill does
+ * (focus, select, insert text), so the page sees ordinary input events. It is passed to evaluate and
+ * not to fill because fill puts its argument into the step title, and the step titles end up in the
+ * html report.
  */
 function enterText(element: HTMLElement | SVGElement, text: string): void {
   const field = element as unknown as EditableField;
@@ -70,7 +75,6 @@ function enterText(element: HTMLElement | SVGElement, text: string): void {
   const isField = 'value' in field && typeof field.select === 'function';
   element.focus();
   if (isField) {
-    if (field.disabled || field.readOnly) throw new Error('baselinewatch: the field cannot be edited');
     field.select();
   } else if ((element as HTMLElement).isContentEditable) {
     doc.getSelection()?.selectAllChildren(element);
@@ -79,8 +83,12 @@ function enterText(element: HTMLElement | SVGElement, text: string): void {
   }
   if (!doc.execCommand('insertText', false, text)) {
     if (!isField) throw new Error('baselinewatch: the text could not be entered');
-    field.value = text;
+    // The setter of the prototype, so that a framework that tracks the value sees the change.
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), 'value')?.set;
+    if (setter) setter.call(field, text);
+    else field.value = text;
     element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
   }
 }
 
@@ -100,6 +108,8 @@ export type MonitorWorkerFixtures = { account: Account };
 
 type TestState = {
   masks: Locator[];
+  /** The locators filled with fillSecret; only these are emptied when the test ends. */
+  secrets: Locator[];
   /** Set when the test used measure; the finish step reads the slow parts from it. */
   session: MeasureSession | undefined;
 };
@@ -131,14 +141,17 @@ export const test = base.extend<
 
   // Playwright reads the fixture dependencies from the first parameter, so it must be a pattern.
   blwTestState: async ({}, use) => {
-    await use({ masks: [], session: undefined });
+    await use({ masks: [], secrets: [], session: undefined });
   },
 
   fillSecret: async ({ blwTestState }, use) => {
     await use(async (locator, value) => {
       // Register first, so a fill that fails still leaves the field masked.
       blwTestState.masks.push(locator);
-      await locator.waitFor({ state: 'visible' });
+      blwTestState.secrets.push(locator);
+      // fill waits until the field is visible, enabled and editable, and refuses a target that cannot
+      // be filled; an empty string leaves nothing in its step title.
+      await locator.fill('');
       await locator.evaluate(enterText, value);
     });
   },
@@ -181,9 +194,12 @@ export const test = base.extend<
       // A failed screenshot is an ordinary test error. The slow error is added only to a test that
       // would otherwise pass, so a failed test never carries it; the slow verdicts stay in the
       // annotations either way. Only the default page is captured.
-      const body = await page.screenshot(screenshotOptions(blwTestState.masks));
-      await testInfo.attach(SCREENSHOT_ATTACHMENT, { body, contentType: 'image/png' });
-      await emptyFields(blwTestState.masks);
+      try {
+        const body = await page.screenshot(screenshotOptions(blwTestState.masks));
+        await testInfo.attach(SCREENSHOT_ATTACHMENT, { body, contentType: 'image/png' });
+      } finally {
+        await emptyFields(blwTestState.secrets);
+      }
       const slow = finishMessage(blwTestState.session ? blwTestState.session.slowMessages() : []);
       if (slow !== undefined && testInfo.status === testInfo.expectedStatus) throw new Error(slow);
     },

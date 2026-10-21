@@ -175,7 +175,7 @@ export function outputLines(run: RunResult): string[] {
     .filter((line) => line.trim() !== '');
 }
 
-const BINARY_FILE = /\.(?:png|webm|zip|zst|gz)$/i;
+const BINARY_FILE = /\.(?:png|jpe?g|gif|webm|mp4|zip|zst|gz|pdf)$/i;
 
 /**
  * The text of every file under a directory, with the zip data inside an html report decoded. Unless
@@ -194,7 +194,7 @@ function directoryTexts(root: string, snapshots: boolean, dir: string = root): [
       const label = path.relative(root, file);
       const text = fs.readFileSync(file, 'utf8');
       texts.push([label, text]);
-      if (entry.name.endsWith('.html')) {
+      if (entry.name === 'index.html') {
         const inner = embeddedZipTexts(text);
         // A report whose data cannot be found would make this check pass for the wrong reason.
         if (inner.length === 0) throw new Error(`no zip data found in ${label}: the report format changed`);
