@@ -221,10 +221,16 @@ export type RunResult = {
   timedOut: boolean;
 };
 
+// taskkill.exe by its full path under the system directory, never through PATH or the working directory.
+function taskkillExe(): string {
+  const systemRoot = [process.env.SystemRoot, process.env.windir].find((value) => value !== undefined && value !== '') ?? 'C:\\Windows';
+  return path.win32.join(systemRoot, 'System32', 'taskkill.exe');
+}
+
 function killTree(pid: number | undefined): void {
   if (pid === undefined) return;
   if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    spawnSync(taskkillExe(), ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     return;
   }
   try {

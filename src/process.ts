@@ -1,7 +1,8 @@
 // The Playwright child process of one pass: the argument list, the launch, the line relay of its
 // standard output, the log of its standard error and the watchdog. The child is node itself running
-// the project's own Playwright CLI; there is no shell, no npx and no PATH lookup. This module loads no
-// Playwright module: the CLI file is only resolved to a path.
+// the project's own Playwright CLI; there is no shell, no npx and no PATH lookup, and on Windows the
+// taskkill tool is named by its full path in the system directory. This module loads no Playwright
+// module: the CLI file is only resolved to a path.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -35,11 +36,38 @@ export function resolvePlaywrightCli(root: string): string {
 }
 
 /**
+ * The signals that end a run early. SIGHUP (a closed terminal or SSH session) exists only off Windows;
+ * SIGBREAK only means something on Windows and is harmless elsewhere.
+ */
+export function interruptSignals(platform: NodeJS.Platform): NodeJS.Signals[] {
+  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGBREAK'];
+  if (platform !== 'win32') {
+    signals.push('SIGHUP');
+  }
+  return signals;
+}
+
+/** The taskkill tool by its full path under the system directory, never through PATH or the working directory. */
+export function taskkillPath(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = [env.SystemRoot, env.windir].find((value) => value !== undefined && value !== '') ?? 'C:\\Windows';
+  return path.win32.join(systemRoot, 'System32', 'taskkill.exe');
+}
+
+/**
  * Splits text that arrives in chunks into lines. A line leaves without its line end and without a
- * carriage return in front of it; what is left over when the stream ends leaves as a last line.
+ * carriage return in front of it; what is left over when the stream ends leaves as a last line. A print
+ * that throws loses that one line; the relay goes on, so a failing sink can never become an uncaught
+ * exception in a stream handler.
  */
 export function createLineRelay(print: (line: string) => void): { push(chunk: string): void; end(): void } {
   let pending = '';
+  const emit = (line: string): void => {
+    try {
+      print(line);
+    } catch {
+      // The line is lost; the pass and the lines after it go on.
+    }
+  };
   return {
     push(chunk: string): void {
       pending += chunk;
@@ -47,7 +75,7 @@ export function createLineRelay(print: (line: string) => void): { push(chunk: st
       while (newline !== -1) {
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
-        print(line.endsWith('\r') ? line.slice(0, -1) : line);
+        emit(line.endsWith('\r') ? line.slice(0, -1) : line);
         newline = pending.indexOf('\n');
       }
     },
@@ -55,7 +83,7 @@ export function createLineRelay(print: (line: string) => void): { push(chunk: st
       const rest = pending.endsWith('\r') ? pending.slice(0, -1) : pending;
       pending = '';
       if (rest !== '') {
-        print(rest);
+        emit(rest);
       }
     },
   };
@@ -67,7 +95,7 @@ export function killTree(pid: number | undefined): void {
     return;
   }
   if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    spawnSync(taskkillPath(), ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     return;
   }
   try {
@@ -104,6 +132,12 @@ export function runChild(options: ChildOptions): Promise<PassRun> {
       detached: process.platform !== 'win32',
       windowsHide: true,
     });
+    // An abnormal end of blw (an uncaught error, process.exit) must not leave Playwright running and
+    // signing in to the portal: the exit event runs synchronously, so the tree is killed right there.
+    const onExit = (): void => {
+      killTree(child.pid);
+    };
+    process.once('exit', onExit);
     const relay = createLineRelay(options.print);
     let timedOut = false;
     let interrupted = false;
@@ -134,6 +168,7 @@ export function runChild(options: ChildOptions): Promise<PassRun> {
       }
     }
     const cleanup = (): void => {
+      process.removeListener('exit', onExit);
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     };

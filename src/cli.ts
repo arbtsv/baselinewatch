@@ -7,10 +7,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { print } from './output.ts';
 import { runPrechecks } from './precheck.ts';
-import { runPlaywrightPass } from './process.ts';
+import { interruptSignals, runPlaywrightPass } from './process.ts';
 import { main, type RunDeps } from './run.ts';
-
-const INTERRUPT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGBREAK'] as const;
 
 const deps: RunDeps = {
   cliFile: fileURLToPath(import.meta.url),
@@ -20,11 +18,12 @@ const deps: RunDeps = {
   prechecks: runPrechecks,
   runPass: runPlaywrightPass,
   onInterrupt: (handler) => {
-    for (const signal of INTERRUPT_SIGNALS) {
+    const signals = interruptSignals(process.platform);
+    for (const signal of signals) {
       process.on(signal, handler);
     }
     return () => {
-      for (const signal of INTERRUPT_SIGNALS) {
+      for (const signal of signals) {
         process.off(signal, handler);
       }
     };
