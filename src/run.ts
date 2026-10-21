@@ -110,14 +110,14 @@ function summaryOf(run: RunInfo, decision: Decision, deps: RunDeps): Summary {
   });
 }
 
-// Appends a failure of the history to cli-error.log; the log write never throws.
+// Appends the detail of a failure to a log file; the write never throws.
 function logFailure(logFile: string, error: unknown): void {
   const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
   try {
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     fs.appendFileSync(logFile, `${detail}\n`, 'utf8');
   } catch {
-    // The warning in the summary still tells the operator that the history is incomplete.
+    // The console line or the warning in the summary still tells the operator that something went wrong.
   }
 }
 
@@ -176,22 +176,34 @@ function stopWithoutRun(reason: NotReadyReason, message: string, deps: RunDeps):
   return 3;
 }
 
+// Prints the lines one by one; a sink that throws costs that line, never the exit code.
+function printAll(lines: readonly string[], deps: RunDeps): void {
+  for (const line of lines) {
+    try {
+      deps.print(line);
+    } catch {
+      // The exit code and the files carry the result when the console cannot.
+    }
+  }
+}
+
 /**
- * An unexpected exception: the stack goes to cli-error.log, the run is recorded as a report that was
- * not built when that is still possible, and the console shows one generic line without the stack.
+ * An unexpected exception: the stack goes to cli-error.log and the console shows one generic line
+ * without the stack. From the first part of the summary on disk, every output follows that summary;
+ * before that, an exception means the report was not built, and the run is recorded as such when that
+ * is still possible.
  */
-function failInternally(root: string, error: unknown, run: RunInfo | undefined, deps: RunDeps): 1 {
-  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+function failInternally(root: string, error: unknown, run: RunInfo | undefined, deps: RunDeps): 0 | 1 | 3 {
   const logFile = run === undefined ? path.join(root, 'artifacts', 'cli-error.log') : run.layout.cliErrorLog;
-  try {
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, `${detail}\n`, 'utf8');
-  } catch {
-    // The console line below still tells the operator that something went wrong.
+  logFailure(logFile, error);
+  const catalog = catalogFor(run?.locale ?? 'en');
+  if (run?.summary !== undefined) {
+    printAll([...internalErrorLines(logFile, catalog), ...exitLines(run.summary)], deps);
+    return run.summary.exit_code;
   }
   const decision = decide({ pass1: { state: 'missing' }, requested: [] });
   let summary: Pick<Summary, 'result' | 'reason'> = { result: decision.result, reason: decision.reason };
-  if (run !== undefined && run.summary === undefined) {
+  if (run !== undefined) {
     const full = summaryOf(run, decision, deps);
     summary = full;
     try {
@@ -200,10 +212,7 @@ function failInternally(root: string, error: unknown, run: RunInfo | undefined, 
       // Best effort: the files that could not be written stay missing.
     }
   }
-  const catalog = catalogFor(run?.locale ?? 'en');
-  for (const line of [...internalErrorLines(logFile, catalog), ...exitLines(summary)]) {
-    deps.print(line);
-  }
+  printAll([...internalErrorLines(logFile, catalog), ...exitLines(summary)], deps);
   return 1;
 }
 
