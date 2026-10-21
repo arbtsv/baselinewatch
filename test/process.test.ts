@@ -12,6 +12,7 @@ import {
   createLineRelay,
   interruptSignals,
   playwrightArgs,
+  printableLine,
   resolvePlaywrightCli,
   runChild,
   taskkillPath,
@@ -157,6 +158,36 @@ describe('runChild', () => {
     const { run } = await node('setTimeout(() => {}, 60000);', freshLog(), { signal: controller.signal });
     assert.ok(Date.now() - started < 10_000);
     assert.equal(run.interrupted, true);
+  });
+});
+
+describe('control characters in relayed lines', () => {
+  test('an escape sequence goes out whole and the bell with it, the tab stays', () => {
+    assert.equal(printableLine('a\u001b[31mred\u001b[0m\tb\u0007c'), 'ared\tbc');
+  });
+
+  test('null, a lone escape, delete, the single-byte sequence start and an inner carriage return are removed', () => {
+    assert.equal(printableLine('a\u0000b\u001bc\u007fd\u009be\rf'), 'abcdef');
+  });
+
+  test('multi-byte characters pass through', () => {
+    // Written with escapes: the test file stays free of non-ASCII text.
+    assert.equal(printableLine('От\tok'), 'От\tok');
+  });
+
+  test('the relay prints an inner carriage return removed and still drops a trailing one', () => {
+    const printed: string[] = [];
+    const relay = createLineRelay((line) => printed.push(line));
+    relay.push('x\ry\n');
+    relay.push('y\r\n');
+    relay.end();
+    assert.deepEqual(printed, ['xy', 'y']);
+  });
+
+  test('a child that writes a colour sequence prints the plain text only', async () => {
+    const source = "process.stdout.write('\\u001b[32mok\\u001b[0m\\n');";
+    const { lines } = await node(source, freshLog());
+    assert.deepEqual(lines, ['ok']);
   });
 });
 
