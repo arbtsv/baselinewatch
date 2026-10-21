@@ -1,6 +1,7 @@
 // The CSV history: metrics.csv gets one row per measured metric of every pass, runs.csv one row per
-// run. Both files only grow. This module renders rows and appends them; it never reads a file for the
-// current run. Only node:fs and node:path are used at run time.
+// run. Both files only grow. This module renders rows and appends them; rows are never read back, and
+// only the last byte of an existing file is looked at, so a new row never joins a cut-off last line.
+// Only node:fs and node:path are used at run time.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MetricRow } from './reporters/collect.ts';
@@ -93,23 +94,41 @@ export function runsCsvLine(row: RunsRow): string {
   ]);
 }
 
+const LINE_FEED = 0x0a;
+
+/** True when the last byte of an existing, non-empty file is not a line feed. */
+function endsMidLine(file: string, size: number): boolean {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const last = Buffer.alloc(1);
+    fs.readSync(fd, last, 0, 1, size - 1);
+    return last[0] !== LINE_FEED;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Appends lines to a CSV file in one write. The header goes first only when the file is missing or
- * empty; an existing file is never rewritten. No lines leave the file, and its absence, alone.
+ * empty; an existing file is never rewritten. When an existing file does not end with a line feed
+ * (a cut-off last row), one is written first so the new rows never join that line. No lines leave the
+ * file, and its absence, alone. Every read or write failure is thrown to the caller.
  */
 export function appendCsv(file: string, header: readonly string[], lines: readonly string[]): void {
   if (lines.length === 0) {
     return;
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  let needsHeader = true;
+  let size = 0;
   try {
-    needsHeader = fs.statSync(file).size === 0;
+    size = fs.statSync(file).size;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw error;
     }
   }
+  const needsHeader = size === 0;
+  const prefix = !needsHeader && endsMidLine(file, size) ? '\n' : '';
   const all = needsHeader ? [line(header), ...lines] : lines;
-  fs.appendFileSync(file, all.map((entry) => `${entry}\n`).join(''), 'utf8');
+  fs.appendFileSync(file, prefix + all.map((entry) => `${entry}\n`).join(''), 'utf8');
 }

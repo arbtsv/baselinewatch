@@ -226,6 +226,23 @@ describe('DataReporter: scheduled pass 2', () => {
   });
 });
 
+describe('DataReporter: a metrics.csv whose last row lost its line break', () => {
+  test('rows after a metrics.csv without its final line break start on their own line', () => {
+    const dir = freshDir();
+    const opts = options(dir);
+    const earlier = `${RUN_ID},1,2026-10-20T12:00:00.000Z,demo,node-9,login_ms,800.0,1000,3,0.800,ok,1`;
+    fs.writeFileSync(opts.metricsCsv, `${HEADER}\n${earlier}`);
+    runPass(opts, configOf('node-1'), [[NODE_1, NODE_1_RESULT()]]);
+    const lines = csvLines(opts.metricsCsv);
+    assert.equal(lines[0], HEADER);
+    assert.equal(lines[1], earlier);
+    assert.equal(lines.length, 1 + 1 + 3);
+    for (const line of lines) {
+      assert.equal(line.split(',').length, 12);
+    }
+  });
+});
+
 describe('DataReporter: manual run', () => {
   test('it writes the pass file and leaves no metrics.csv', () => {
     const dir = freshDir();

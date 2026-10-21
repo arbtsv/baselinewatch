@@ -171,4 +171,30 @@ describe('appendCsv', () => {
     appendCsv(file, ['a'], ['1', '2']);
     assert.equal(fs.readFileSync(file, 'utf8').includes('\r'), false);
   });
+
+  test('a file whose last row has no line feed gets one before the new rows', () => {
+    const file = tempFile();
+    fs.writeFileSync(file, 'a,b\n1,2');
+    appendCsv(file, ['a', 'b'], ['3,4']);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'a,b\n1,2\n3,4\n');
+  });
+
+  test('a header without a line feed gets one and no second header', () => {
+    const file = tempFile();
+    fs.writeFileSync(file, 'a,b');
+    appendCsv(file, ['a', 'b'], ['3,4']);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'a,b\n3,4\n');
+  });
+
+  test('a file that ends with CRLF gets no extra line feed', () => {
+    const file = tempFile();
+    fs.writeFileSync(file, 'a,b\r\n1,2\r\n');
+    appendCsv(file, ['a', 'b'], ['3,4']);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'a,b\r\n1,2\r\n3,4\n');
+  });
+
+  test('a path that is a directory makes the append throw', () => {
+    const dir = path.dirname(tempFile());
+    assert.throws(() => appendCsv(dir, ['a', 'b'], ['1,2']));
+  });
 });
