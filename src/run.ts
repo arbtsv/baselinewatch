@@ -96,8 +96,8 @@ type RunInfo = {
   startedAt: Date;
   coreVersion: string;
   locale: Locale;
-  /** True once the files and the runs.csv row of the run are written. */
-  recorded: boolean;
+  /** The summary once part of it is on disk (the runs.csv row or summary.json); every later output agrees with it. */
+  summary?: Summary;
 };
 
 function summaryOf(run: RunInfo, decision: Decision, deps: RunDeps): Summary {
@@ -110,22 +110,43 @@ function summaryOf(run: RunInfo, decision: Decision, deps: RunDeps): Summary {
   });
 }
 
-// summary.json and report.txt through a temp file, then one runs.csv row.
-function recordRun(run: RunInfo, summary: Summary): void {
-  writeFileAtomic(run.layout.summaryJson, `${JSON.stringify(summary, null, 2)}\n`);
-  writeFileAtomic(run.layout.reportTxt, renderReport(summary, catalogFor(run.locale)));
-  appendCsv(run.layout.runsCsv, RUNS_CSV_HEADER, [
-    runsCsvLine({
-      run_id: summary.run_id,
-      ts_start: summary.started_at,
-      ts_end: summary.finished_at,
-      result: summary.result,
-      exit_code: summary.exit_code,
-      reason: summary.reason,
-      core_version: summary.core_version,
-    }),
-  ]);
-  run.recorded = true;
+// Appends a failure of the history to cli-error.log; the log write never throws.
+function logFailure(logFile: string, error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  try {
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.appendFileSync(logFile, `${detail}\n`, 'utf8');
+  } catch {
+    // The warning in the summary still tells the operator that the history is incomplete.
+  }
+}
+
+// The runs.csv row first, then summary.json and report.txt through a temp file. The CSV history is
+// best effort: a failed append becomes the history_not_written warning instead of a different verdict.
+// The row comes first so that this warning is in the record files on their only write.
+function recordRun(run: RunInfo, summary: Summary): Summary {
+  let recorded = summary;
+  try {
+    appendCsv(run.layout.runsCsv, RUNS_CSV_HEADER, [
+      runsCsvLine({
+        run_id: summary.run_id,
+        ts_start: summary.started_at,
+        ts_end: summary.finished_at,
+        result: summary.result,
+        exit_code: summary.exit_code,
+        reason: summary.reason,
+        core_version: summary.core_version,
+      }),
+    ]);
+    run.summary = summary;
+  } catch (error) {
+    logFailure(run.layout.cliErrorLog, error);
+    recorded = { ...summary, warnings: [...summary.warnings, { code: 'history_not_written' }] };
+  }
+  writeFileAtomic(run.layout.summaryJson, `${JSON.stringify(recorded, null, 2)}\n`);
+  run.summary = recorded;
+  writeFileAtomic(run.layout.reportTxt, renderReport(recorded, catalogFor(run.locale)));
+  return recorded;
 }
 
 /**
@@ -134,8 +155,7 @@ function recordRun(run: RunInfo, summary: Summary): void {
 function finishRun(run: RunInfo, end: Finish, deps: RunDeps): 0 | 1 | 3 {
   const { decision } = end;
   const catalog = catalogFor(run.locale);
-  const summary = summaryOf(run, decision, deps);
-  recordRun(run, summary);
+  const summary = recordRun(run, summaryOf(run, decision, deps));
   const lines =
     decision.status === 'not_ready' && decision.reason !== null
       ? notReadyLines(decision.reason as NotReadyReason, end.message, catalog)
@@ -171,7 +191,7 @@ function failInternally(root: string, error: unknown, run: RunInfo | undefined, 
   }
   const decision = decide({ pass1: { state: 'missing' }, requested: [] });
   let summary: Pick<Summary, 'result' | 'reason'> = { result: decision.result, reason: decision.reason };
-  if (run !== undefined && !run.recorded) {
+  if (run !== undefined && run.summary === undefined) {
     const full = summaryOf(run, decision, deps);
     summary = full;
     try {
@@ -238,7 +258,7 @@ async function runPasses(
 async function execute(root: string, args: RunArgs, deps: RunDeps, state: { run?: RunInfo }): Promise<0 | 1 | 3> {
   const { runId, startedAt } = await claimRunDirectory(root, deps);
   const layout = runLayout(root, { runId, pass: 1, manual: false });
-  const run: RunInfo = { layout, runId, startedAt, coreVersion: readCoreVersion(deps.cliFile), locale: 'en', recorded: false };
+  const run: RunInfo = { layout, runId, startedAt, coreVersion: readCoreVersion(deps.cliFile), locale: 'en' };
   state.run = run;
   // The last run's files are removed first, so a stale pair is never read as this run's.
   fs.rmSync(layout.reportTxt, { force: true });

@@ -174,6 +174,7 @@ type SummaryFile = {
   nodes: { scenario: string; node: string; class: string; recheck: string | null }[];
   not_measured: { scenario: string; node: string; metric: string }[];
   unused_baselines: { scenario: string; node: string; metric: string }[];
+  warnings: { code: string; pass?: number; scenario?: string; node?: string }[];
 };
 
 type PassFileJson = {
@@ -635,6 +636,42 @@ async function runWithLocale(mode: PortalMode, locale: 'en' | 'ru'): Promise<{ l
     await portal.stop();
   }
 }
+
+test.describe('unwritable history', () => {
+  test('a runs.csv that cannot be written leaves the pass verdict intact', async () => {
+    cleanArtifacts();
+    const runsCsv = path.join(DEMO_ARTIFACTS_DIR, 'runs.csv');
+    fs.mkdirSync(runsCsv, { recursive: true });
+    const portal = await startPortal('ok');
+    try {
+      const env = await demoEnv({ 'node-1': portal.url });
+      const run = await withDemoEnv(env, () => runBlw(['run'], { cwd: REPO_ROOT, timeoutMs: RUN_TIMEOUT_MS }));
+      const output = `${run.stdout}\n${run.stderr}`;
+      expect(run.timedOut).toBe(false);
+      expect(run.status, output).toBe(0);
+      const lines = outputLines(run);
+      expect(lines.at(-1), output).toBe('RESULT=PASS');
+      expect(lines.filter((line) => line.startsWith('REASON='))).toEqual([]);
+
+      const summary = readArtifactJson('summary.json') as unknown as SummaryFile;
+      expect(summary.status).toBe('pass');
+      expect(summary.exit_code).toBe(0);
+      expect(summary.reason).toBeNull();
+      expect(summary.warnings).toEqual([{ code: 'history_not_written' }]);
+      const runId = summary.run_id;
+      expect(runId).toMatch(RUN_ID);
+      expect(fs.readFileSync(path.join(DEMO_ARTIFACTS_DIR, 'report.txt'), 'utf8')).toContain('runs.csv');
+      expect(exists(DEMO_ARTIFACTS_DIR, 'runs', runId, 'pass-1.json')).toBe(true);
+      expect(metricCells(runId)).not.toEqual([]);
+
+      fs.rmSync(runsCsv, { recursive: true, force: true });
+      await expectNoDemoSecrets(run, runId);
+    } finally {
+      fs.rmSync(runsCsv, { recursive: true, force: true });
+      await portal.stop();
+    }
+  });
+});
 
 test('locale ru changes the report text but not the machine lines', async () => {
   const english = await runWithLocale('ok', 'en');

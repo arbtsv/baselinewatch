@@ -85,8 +85,12 @@ export type Reason = NotReadyReason | FailReason;
 /** The process exit codes of a run. */
 export const EXIT_CODES = { pass: 0, fail: 1, notReady: 3 } as const;
 
-/** Codes of the warnings a summary can carry; the report translates them from structure. */
-export const WARNING_CODES = ['pass_invalid', 'pass_2_not_built'] as const;
+/**
+ * Codes of the warnings a summary can carry; the report translates them from structure. A
+ * history_not_written warning without pass names the runs.csv row of the run, and with pass n the
+ * metrics.csv rows of pass n.
+ */
+export const WARNING_CODES = ['pass_invalid', 'pass_2_not_built', 'history_not_written'] as const;
 export type WarningCode = (typeof WARNING_CODES)[number];
 
 /** Start of the result line a run prints for a scheduler. */

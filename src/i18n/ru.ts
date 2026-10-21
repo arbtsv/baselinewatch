@@ -33,6 +33,10 @@ export const ru: Catalog = {
           : `Файл прохода ${warning.pass} отсутствует или повреждён; его результаты не использованы.`;
       case 'pass_2_not_built':
         return `Повторная проверка ${warning.scenario ?? '?'} / ${warning.node ?? '?'} не дала результата.`;
+      case 'history_not_written':
+        return warning.pass === undefined
+          ? 'Историю запусков (runs.csv) не удалось обновить; подробности в cli-error.log в каталоге запуска.'
+          : `Строки метрик прохода ${warning.pass} не удалось добавить в metrics.csv.`;
     }
   },
   resultLine: (result, reason) => (reason === null ? `Результат: ${result}` : `Результат: ${result} (${reason})`),

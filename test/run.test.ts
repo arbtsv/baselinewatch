@@ -367,6 +367,57 @@ describe('an unexpected failure', () => {
   });
 });
 
+describe('a history file that cannot be written', () => {
+  // runs.csv as a directory: every append to it fails.
+  function blockRunsCsv(root: string): void {
+    fs.mkdirSync(path.join(artifacts(root), 'runs.csv'), { recursive: true });
+  }
+
+  test('a clean pass 1 still passes when runs.csv cannot be written', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+        return CLEAN_EXIT;
+      },
+    });
+    blockRunsCsv(h.root);
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.ok(!h.lines.some((line) => line.startsWith('REASON=')));
+    const summary = readSummary(h.root);
+    assert.equal(summary.status, 'pass');
+    assert.equal(summary.result, 'PASS');
+    assert.equal(summary.exit_code, 0);
+    assert.equal(summary.reason, null);
+    assert.deepEqual(summary.warnings, [{ code: 'history_not_written' }]);
+    const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning({ code: 'history_not_written' })));
+    const log = fs.readFileSync(path.join(artifacts(h.root), 'runs', FIRST_RUN_ID, 'cli-error.log'), 'utf8');
+    assert.notEqual(log.trim(), '');
+    assert.ok(fs.statSync(path.join(artifacts(h.root), 'runs.csv')).isDirectory());
+    for (const line of h.lines) {
+      assert.ok(!line.includes('    at '), line);
+    }
+  });
+
+  test('a failing run keeps its own reason when runs.csv cannot be written', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, options.pass === 1 ? [project('node-1', 'slow'), project('node-2', 'ok')] : [project('node-1', 'ok')]);
+        return CLEAN_EXIT;
+      },
+    });
+    blockRunsCsv(h.root);
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+    const summary = readSummary(h.root);
+    assert.equal(summary.reason, 'slow');
+    assert.ok(summary.warnings.some((warning) => warning.code === 'history_not_written' && warning.pass === undefined));
+  });
+});
+
 describe('run ids and old files', () => {
   test('an existing run directory makes the run wait for the next second', async () => {
     const made = makeRoot();

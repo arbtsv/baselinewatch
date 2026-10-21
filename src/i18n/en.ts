@@ -31,6 +31,10 @@ export const en: Catalog = {
           : `The file of pass ${warning.pass} is missing or damaged; its results were not used.`;
       case 'pass_2_not_built':
         return `The second look at ${warning.scenario ?? '?'} / ${warning.node ?? '?'} left no result.`;
+      case 'history_not_written':
+        return warning.pass === undefined
+          ? 'The run history (runs.csv) could not be updated; details are in cli-error.log in the run directory.'
+          : `The metric rows of pass ${warning.pass} could not be added to metrics.csv.`;
     }
   },
   resultLine: (result, reason) => (reason === null ? `Result: ${result}` : `Result: ${result} (${reason})`),
