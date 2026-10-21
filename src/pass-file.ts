@@ -89,6 +89,8 @@ function isIsoUtc(value: unknown): value is string {
   return typeof value === 'string' && ISO_UTC.test(value) && Number.isFinite(Date.parse(value));
 }
 
+// A project must agree with itself: class error exactly when an error category is recorded, class ok
+// only without a slow metric, class slow only with at least one. Anything else is a damaged file.
 function projectOf(value: unknown): PassProject | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -114,6 +116,13 @@ function projectOf(value: unknown): PassProject | undefined {
       return undefined;
     }
     checked.push(metric);
+  }
+  if ((projectClass === 'error') !== (error_category !== null)) {
+    return undefined;
+  }
+  const anySlow = checked.some((metric) => metric.verdict === 'slow');
+  if ((projectClass === 'ok' && anySlow) || (projectClass === 'slow' && !anySlow)) {
+    return undefined;
   }
   return {
     project,

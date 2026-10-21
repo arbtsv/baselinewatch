@@ -27,7 +27,7 @@ const PROJECT: PassProject = {
   project: 'demo--node-1',
   scenario: 'demo',
   node: 'node-1',
-  class: 'ok',
+  class: 'slow',
   metrics: [{ name: 'login_ms', ms: 1234.5678, reference_ms: 300, maxRatio: 3, ratio: 4.115226, verdict: 'slow' }],
   error_category: null,
 };
@@ -65,7 +65,7 @@ function validFile(): PassFile {
     pass: 1,
     startedAt: new Date('2026-10-20T10:15:00.000Z'),
     finishedAt: new Date('2026-10-20T10:15:42.500Z'),
-    projects: [PROJECT, { ...PROJECT, project: 'demo--node-2', node: 'node-2', metrics: [] }],
+    projects: [PROJECT, { ...PROJECT, project: 'demo--node-2', node: 'node-2', class: 'ok', metrics: [] }],
     gaps: { not_measured: [], unused_baselines: [{ scenario: 'demo', node: 'node-1', metric: 'history_ms' }] },
   });
 }
@@ -106,6 +106,19 @@ describe('validatePassFile', () => {
     ['the category net', (f) => (f.projects[0].error_category = 'net')],
     ['a missing category', (f) => delete f.projects[0].error_category],
     ['a metric with the verdict fast', (f) => (f.projects[0].metrics[0].verdict = 'fast')],
+    ['the class ok next to a slow metric', (f) => (f.projects[0].class = 'ok')],
+    ['the class slow whose only metric is ok', (f) => (f.projects[0].metrics[0].verdict = 'ok')],
+    ['the class slow with an empty metrics list', (f) => (f.projects[0].metrics = [])],
+    ['the class error without an error category', (f) => (f.projects[0].class = 'error')],
+    [
+      'the class ok with an error category',
+      (f) => {
+        f.projects[0].class = 'ok';
+        f.projects[0].metrics[0].verdict = 'ok';
+        f.projects[0].error_category = 'other';
+      },
+    ],
+    ['the class slow with an error category', (f) => (f.projects[0].error_category = 'timeout')],
     ['a metric with a negative ms', (f) => (f.projects[0].metrics[0].ms = -5)],
     ['metrics that are not a list', (f) => (f.projects[0].metrics = {})],
     ['projects that are not a list', (f) => (f.projects = {})],
@@ -149,6 +162,53 @@ describe('validatePassFile', () => {
       assert.equal(validatePassFile(value, BOTH), undefined);
     }
   });
+});
+
+describe('a project whose class agrees with its metrics and category', () => {
+  const accepted: [string, (file: Record<string, any>) => void][] = [
+    [
+      'the class ok with an empty metrics list',
+      (f) => {
+        f.projects[0].class = 'ok';
+        f.projects[0].metrics = [];
+      },
+    ],
+    [
+      'the class ok with one ok metric',
+      (f) => {
+        f.projects[0].class = 'ok';
+        f.projects[0].metrics[0].verdict = 'ok';
+      },
+    ],
+    [
+      'the class slow with one slow and one ok metric',
+      (f) => {
+        f.projects[0].metrics.push({ ...f.projects[0].metrics[0], name: 'search_ms', verdict: 'ok' });
+      },
+    ],
+    [
+      'the class error with a category and a slow metric',
+      (f) => {
+        f.projects[0].class = 'error';
+        f.projects[0].error_category = 'other';
+      },
+    ],
+    [
+      'the class error with the category config and no metrics',
+      (f) => {
+        f.projects[0].class = 'error';
+        f.projects[0].error_category = 'config';
+        f.projects[0].metrics = [];
+      },
+    ],
+  ];
+  for (const [title, change] of accepted) {
+    test(`${title} reads back as ok`, () => {
+      const file = path.join(WORK, 'consistent.json');
+      fs.writeFileSync(file, JSON.stringify(changed(change)), 'utf8');
+      assert.equal(readPassFile(file, BOTH).state, 'ok');
+    });
+  }
 });
 
 describe('readPassFile with damaged files', () => {

@@ -96,6 +96,42 @@ describe('outcome from pass files on disk', () => {
     );
     assert.deepEqual(exitLines(summary), ['REASON=slow', 'RESULT=FAIL']);
   });
+
+  test('a pass 1 whose class contradicts its metrics fails closed', () => {
+    const dir = path.join(WORK, 'runs', 'contradiction');
+    const contradicting: PassProject = {
+      ...project('node-1', 'ok'),
+      metrics: [{ name: 'login_ms', ms: 900, reference_ms: 300, maxRatio: 3, ratio: 3, verdict: 'slow' }],
+    };
+    writeFileAtomic(
+      path.join(dir, 'pass-1.json'),
+      passFileText(
+        buildPassFile({
+          runId: RUN_ID,
+          pass: 1,
+          startedAt: new Date('2026-10-20T10:15:00.000Z'),
+          finishedAt: new Date('2026-10-20T10:15:30.000Z'),
+          projects: [contradicting, project('node-2', 'ok')],
+        }),
+      ),
+    );
+
+    const pass1 = readPassFile(path.join(dir, 'pass-1.json'), {
+      runId: RUN_ID,
+      pass: 1,
+      projects: CONFIGURED,
+      requireAll: true,
+    });
+    assert.equal(pass1.state, 'invalid');
+
+    const decision = decide({ pass1, requested: CONFIGURED });
+    assert.equal(decision.status, 'fail');
+    assert.equal(decision.result, 'FAIL');
+    assert.equal(decision.exit_code, 1);
+    assert.equal(decision.reason, 'report_not_built');
+    assert.deepEqual(decision.nodes, []);
+    assert.deepEqual(decision.warnings, [{ code: 'pass_invalid', pass: 1 }]);
+  });
 });
 
 // ---- The outcome table, with the pass reads built in memory. ----
