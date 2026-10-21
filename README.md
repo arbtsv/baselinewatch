@@ -37,6 +37,17 @@ exit code that any scheduler understands:
 
 Out of scope: charts, desktop shortcuts, scheduling, alerting.
 
+## Supported install
+
+The core is installed into a monitoring project from the `.tgz` that `npm pack`
+builds, so it lives in `<project>/node_modules/baselinewatch`. `blw run` finds
+the project from that location.
+
+Known limit for now: other layouts are not supported yet, for example pnpm,
+`npm link`, a `file:` dependency on a directory, or a workspace that hoists
+packages. A copy that runs from anywhere else stops with a configuration error
+that names this install.
+
 ## Development
 
 This repository is public, and leak prevention is part of the project. Before

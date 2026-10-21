@@ -21,9 +21,16 @@ export type MeasureDeps = {
 
 export type MeasureSession = { measure: Measure; records(): MetricRecord[]; slowMessages(): string[] };
 
-/** One part of the slow error: whole milliseconds and a two-decimal ratio, for people to read. */
+/** The error of a retried test: the retry stops in fixture setup, before the test body runs. */
+export const RETRY_GUARD_MESSAGE = 'baselinewatch: retries are off, so a failed test is not run again in the same run';
+
+/**
+ * One part of the slow error, for people to read: the time and the limit (reference_ms times
+ * maxRatio) in whole milliseconds, and the ratio with three decimals, so a ratio just above
+ * maxRatio never reads as equal to it.
+ */
 export function slowMessage(record: MetricRecord): string {
-  return `${record.name} ${Math.round(record.ms)} ms (${record.ratio.toFixed(2)}x reference ${record.reference_ms} ms, limit ${record.maxRatio}x)`;
+  return `${record.name} ${Math.round(record.ms)} ms (limit ${Math.round(record.reference_ms * record.maxRatio)} ms, ratio ${record.ratio.toFixed(3)})`;
 }
 
 /** The text of the single slow error, or undefined when no step was slow. */

@@ -282,8 +282,18 @@ describe('slowMessage and finishMessage', () => {
     verdict: 'slow',
   };
 
-  test('slowMessage rounds ms to whole milliseconds and the ratio to two decimals', () => {
-    assert.equal(slowMessage(record), 'overview_ms 1235 ms (4.12x reference 300 ms, limit 3x)');
+  test('slowMessage prints the time, the limit in milliseconds and a three-decimal ratio', () => {
+    assert.equal(slowMessage(record), 'overview_ms 1235 ms (limit 900 ms, ratio 4.115)');
+    // A time just above the limit still reads as above it.
+    assert.equal(
+      slowMessage({ name: 'x_ms', ms: 901.2, reference_ms: 300, maxRatio: 3, ratio: 3.004, verdict: 'slow' }),
+      'x_ms 901 ms (limit 900 ms, ratio 3.004)',
+    );
+    // The limit is rounded to whole milliseconds, half up.
+    assert.equal(
+      slowMessage({ name: 'y_ms', ms: 600, reference_ms: 333, maxRatio: 1.5, ratio: 600 / 333, verdict: 'slow' }),
+      'y_ms 600 ms (limit 500 ms, ratio 1.802)',
+    );
   });
 
   test('finishMessage of an empty list is undefined', () => {

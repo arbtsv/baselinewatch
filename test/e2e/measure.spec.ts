@@ -2,10 +2,15 @@
 // measure contract end to end, through the packed core.
 //
 // Run: npm run e2e -- test/e2e/measure.spec.ts
+import fs from 'node:fs';
+import path from 'node:path';
 import zlib from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import {
+  cleanArtifacts,
+  DEMO_ARTIFACTS_DIR,
   demoEnv,
+  expectNoDemoSecrets,
   parseJsonReport,
   runDemoPlaywright,
   withDemoEnv,
@@ -239,7 +244,7 @@ test('fillSecret masks the filled field in the one screenshot', async () => {
     expect(item.status).toBe('passed');
     expectOnePng(item);
     expect(maskPixels(item)).toBeGreaterThan(0);
-    // Only the JSON reporter is visible here and it does not list the fill step; the html report is outside this check.
+    // Only the JSON reporter is visible here and it does not list the fill step; the files of a run are checked below.
     expect(run.stdout).not.toContain(SECRET_VALUE);
   } finally {
     await portal.stop();
@@ -270,6 +275,47 @@ test('fillSecret registers the mask before a fill that fails, and the one screen
     expect(item.errors.length).toBeGreaterThan(0);
     expectOnePng(item);
     expect(maskPixels(item)).toBeGreaterThan(0);
+  } finally {
+    await portal.stop();
+  }
+});
+
+// The password comes from env.json at run time, as in a real scenario, so the source of the spec
+// that Playwright embeds in its reports does not hold it.
+const SECRET_THEN_THROW_SOURCE = `import { test } from 'baselinewatch';
+
+test('fail after a secret fill', async ({ page, account, fillSecret }) => {
+  await page.goto('/');
+  await fillSecret(page.getByLabel('Password'), account.password);
+  throw new Error('stop after the fill');
+});
+`;
+
+test('a secret entered with fillSecret is in no file of the run, html report data included', async () => {
+  const portal = await startPortal('ok');
+  try {
+    const env = await demoEnv({}, { scenarios: { 'e2e-secretthrow': { 'node-1': portal.url } } });
+    cleanArtifacts();
+    const run = await withScenario('e2e-secretthrow', SECRET_THEN_THROW_SOURCE, () =>
+      withDemoEnv(env, () => runDemoPlaywright(['test'])),
+    );
+    expect(run.timedOut).toBe(false);
+    // The scenario must have reached the fill and failed on the throw; otherwise nothing was entered
+    // and the secret check below would pass for the wrong reason.
+    expect(run.status).not.toBe(0);
+    const passDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', 'manual', 'pass-1');
+    expect(fs.existsSync(path.join(passDir, 'html', 'index.html'))).toBe(true);
+    const snapshots = fs
+      .readdirSync(path.join(passDir, 'test-results'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(passDir, 'test-results', entry.name, 'error-context.md'))
+      .filter((file) => fs.existsSync(file));
+    expect(snapshots).toHaveLength(1);
+    const snapshot = fs.readFileSync(snapshots[0] as string, 'utf8');
+    expect(snapshot).toContain('stop after the fill');
+    // The snapshot lists the password field, and the field is empty.
+    expect(snapshot).toMatch(/textbox "Password"[^\n:]*(?:\n|$)/);
+    await expectNoDemoSecrets(run, 'manual', { snapshots: true });
   } finally {
     await portal.stop();
   }

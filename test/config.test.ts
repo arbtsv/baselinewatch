@@ -1,7 +1,7 @@
 // Tests for src/config.ts and src/layout.ts: project construction, the fixed run policy, secrets
 // and configuration errors. Importing src/config.ts loads @playwright/test outside a Playwright run.
 // Run: node --test test/config.test.ts
-import { describe, test } from 'node:test';
+import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,7 +11,8 @@ import { buildMonitorConfig, defineMonitorConfig, DIRECT_CONNECTION_ARGS, POLICY
 import type { Baselines } from '../src/baselines.ts';
 import type { MonitorEnv } from '../src/env.ts';
 import { ConfigError } from '../src/errors.ts';
-import { MANUAL_RUN_ID, runLayout } from '../src/layout.ts';
+import { MANUAL_RUN, MANUAL_RUN_ID, runLayout } from '../src/layout.ts';
+import { FINISH_FIXTURE_TIMEOUT_MS } from '../src/protocol.ts';
 
 const LOGIN = 'login-value-for-test';
 const SECRET = 'secret-value-for-test';
@@ -69,8 +70,14 @@ function validBaselines(): object {
   return { demo: { login_ms: { reference_ms: 300, maxRatio: 3 } } };
 }
 
+const created: string[] = [];
+after(() => {
+  for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function makeProject(files: ProjectFiles = {}): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-config-'));
+  created.push(root);
   const env = files.env === undefined ? validEnv() : files.env;
   if (env !== null) fs.writeFileSync(path.join(root, 'env.json'), JSON.stringify(env));
   const baselines = files.baselines === undefined ? validBaselines() : files.baselines;
@@ -158,7 +165,7 @@ describe('buildMonitorConfig: projects', () => {
 
 describe('buildMonitorConfig: fixed run policy', () => {
   const built = buildMonitorConfig(memoryInput());
-  const layout = runLayout(ROOT);
+  const layout = runLayout(ROOT, MANUAL_RUN);
 
   test('nothing is retried, run in parallel or focused', () => {
     assert.equal(built.retries, 0);
@@ -172,6 +179,8 @@ describe('buildMonitorConfig: fixed run policy', () => {
     assert.equal(built.expect?.timeout, 5_000);
     assert.equal(built.use?.actionTimeout, 10_000);
     assert.equal(built.use?.navigationTimeout, 15_000);
+    assert.equal(built.globalTimeout, 900_000);
+    assert.equal(built.globalTimeout, POLICY.globalTimeoutMs);
     assert.equal(built.timeout, POLICY.testTimeoutMs);
     assert.equal(built.expect?.timeout, POLICY.expectTimeoutMs);
     assert.equal(built.use?.actionTimeout, POLICY.actionTimeoutMs);
@@ -179,15 +188,17 @@ describe('buildMonitorConfig: fixed run policy', () => {
   });
 
   test('every policy value is a whole number of milliseconds', () => {
+    assert.ok('globalTimeoutMs' in POLICY);
     for (const [name, value] of Object.entries(POLICY)) {
       assert.ok(Number.isInteger(value) && value > 0, `${name} is ${value}`);
     }
   });
 
   test('a test timeout plus the end-of-test budget stays inside 50 seconds', () => {
-    // 15_000 is the time the measure fixture is allowed for its end-of-test work; the sum leaves
-    // 10 seconds of the 60-second bound for the browser start and the report.
-    assert.ok(POLICY.testTimeoutMs + 15_000 <= 50_000);
+    // FINISH_FIXTURE_TIMEOUT_MS is the time the measure fixture is allowed for its end-of-test work,
+    // read from the core so a changed budget changes this check; the sum leaves 10 seconds of the
+    // 60-second bound for the browser start and the report.
+    assert.ok(POLICY.testTimeoutMs + FINISH_FIXTURE_TIMEOUT_MS <= 50_000);
   });
 
   test('trace, video and the built-in screenshot are off', () => {
@@ -203,12 +214,38 @@ describe('buildMonitorConfig: fixed run policy', () => {
     assert.equal(built.use?.proxy, undefined, "the switch is a launch argument, not Playwright's proxy option");
   });
 
-  test('output goes under the manual run and the only reporter is html that never opens', () => {
+  test('output goes under the manual run', () => {
     assert.equal(MANUAL_RUN_ID, 'manual');
     assert.equal(layout.outputDir, path.join(ROOT, 'artifacts', 'runs', 'manual', 'pass-1', 'test-results'));
     assert.equal(built.outputDir, layout.outputDir);
-    assert.deepEqual(built.reporter, [['html', { outputFolder: layout.htmlDir, open: 'never' }]]);
     assert.equal(layout.htmlDir, path.join(ROOT, 'artifacts', 'runs', 'manual', 'pass-1', 'html'));
+  });
+
+  test('the reporters run in the order data, console, html, and the html report never opens', () => {
+    const reporters = built.reporter;
+    assert.ok(Array.isArray(reporters));
+    assert.equal(reporters.length, 3);
+    const [data, consoleReporter, html] = reporters;
+    assert.ok(consoleReporter !== undefined && path.isAbsolute(consoleReporter[0]));
+    assert.ok(consoleReporter[0].endsWith(path.join('reporters', 'console.ts')), consoleReporter[0]);
+    assert.deepEqual(consoleReporter[1], { pass: 1 });
+    assert.ok(data !== undefined && path.isAbsolute(data[0]));
+    assert.ok(data[0].endsWith(path.join('reporters', 'data.ts')), data[0]);
+    assert.deepEqual(data[1], {
+      runId: 'manual',
+      pass: 1,
+      manual: true,
+      passFile: path.join(ROOT, 'artifacts', 'runs', 'manual', 'pass-1.json'),
+      metricsCsv: path.join(ROOT, 'artifacts', 'metrics.csv'),
+      baselines: MEMORY_BASELINES,
+    });
+    assert.deepEqual(html, ['html', { outputFolder: layout.htmlDir, open: 'never' }]);
+  });
+
+  test('the reporter files exist next to the other sources', () => {
+    const [data, consoleReporter] = built.reporter as [[string, unknown], [string, unknown]];
+    assert.ok(fs.existsSync(data[0]), `${data[0]} is missing`);
+    assert.ok(fs.existsSync(consoleReporter[0]), `${consoleReporter[0]} is missing`);
   });
 });
 
@@ -280,11 +317,96 @@ describe('defineMonitorConfig: files on disk', () => {
   });
 });
 
+describe('defineMonitorConfig: scheduled runs', () => {
+  const VARIABLES = ['BLW_ROOT', 'BLW_RUN_ID', 'BLW_PASS'] as const;
+
+  // Sets the three variables (undefined unsets one), runs from another working directory and
+  // restores everything afterwards.
+  function withEnvironment(values: Partial<Record<(typeof VARIABLES)[number], string>>, fn: () => void): void {
+    const saved = VARIABLES.map((name) => [name, process.env[name]] as const);
+    const cwd = process.cwd();
+    try {
+      for (const name of VARIABLES) {
+        const value = values[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      process.chdir(os.tmpdir());
+      fn();
+    } finally {
+      process.chdir(cwd);
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+
+  test('the project comes from BLW_ROOT whatever the working directory is', () => {
+    const root = makeProject();
+    withEnvironment({ BLW_ROOT: root }, () => {
+      const built = defineMonitorConfig();
+      assert.deepEqual(
+        (built.projects ?? []).map((project) => project.name),
+        ['demo--node-1'],
+      );
+      assert.equal(built.testDir, path.join(root, 'scenarios'));
+    });
+  });
+
+  test('a pass of a scheduled run writes under its own run directory', () => {
+    const root = makeProject();
+    withEnvironment({ BLW_ROOT: root, BLW_RUN_ID: '20261020T123456Z', BLW_PASS: '2' }, () => {
+      const built = defineMonitorConfig();
+      const passDir = path.join(root, 'artifacts', 'runs', '20261020T123456Z', 'pass-2');
+      assert.equal(built.outputDir, path.join(passDir, 'test-results'));
+      const reporters = built.reporter as [[string, Record<string, unknown>], [string, unknown], [string, unknown]];
+      assert.equal(reporters.length, 3);
+      assert.deepEqual(reporters[1][1], { pass: 2 });
+      assert.deepEqual(reporters[2], ['html', { outputFolder: path.join(passDir, 'html'), open: 'never' }]);
+      const options = reporters[0][1];
+      assert.equal(options.runId, '20261020T123456Z');
+      assert.equal(options.pass, 2);
+      assert.equal(options.manual, false);
+      assert.equal(options.passFile, path.join(root, 'artifacts', 'runs', '20261020T123456Z', 'pass-2.json'));
+      assert.equal(options.metricsCsv, path.join(root, 'artifacts', 'metrics.csv'));
+    });
+  });
+
+  test('without the run variables the output stays under runs/manual/pass-1', () => {
+    const root = makeProject();
+    withEnvironment({ BLW_ROOT: root }, () => {
+      const built = defineMonitorConfig();
+      assert.equal(built.outputDir, path.join(root, 'artifacts', 'runs', 'manual', 'pass-1', 'test-results'));
+    });
+  });
+
+  test('options.rootDir wins over BLW_ROOT', () => {
+    const wanted = makeProject();
+    const other = makeProject({ env: null });
+    withEnvironment({ BLW_ROOT: other }, () => {
+      const built = defineMonitorConfig({ rootDir: wanted });
+      assert.equal(built.testDir, path.join(wanted, 'scenarios'));
+    });
+  });
+});
+
 describe('defineMonitorConfig: scenario files', () => {
   test('a scenario without its file is a configuration error that names the file', () => {
     const root = makeProject({ scenarios: [] });
     const error = assertConfigError(() => defineMonitorConfig({ rootDir: root }), /demo\.spec\.ts/);
     assert.equal(error.file, path.join(root, 'scenarios', 'demo.spec.ts'));
+    assert.ok(
+      error.message.includes(`looked in ${path.join(root, 'scenarios')}`),
+      `the message names the scenarios directory: ${error.message}`,
+    );
+  });
+
+  test('src/scenarios.ts loads without Playwright', () => {
+    const source = fs.readFileSync(new URL('../src/scenarios.ts', import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /@playwright\/test/);
+    assert.doesNotMatch(source, /\.\/config\.ts/);
+    assert.doesNotMatch(source, /\.\/fixture\.ts/);
   });
 
   test('a scenarios directory without the right file is the same error', () => {

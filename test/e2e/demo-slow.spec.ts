@@ -25,6 +25,8 @@ function expectOneSlowError(item: JsonTest): void {
   const [message] = item.errors as [string];
   expect(message).toMatch(SLOW_MESSAGE);
   expect(message).toContain('overview_ms');
+  expect(message).toContain('(limit 1350 ms, ratio ');
+  expect(message).toMatch(/ratio \d+\.\d{3}\)/);
   expect(message).not.toContain('login_ms');
   expect(message).not.toContain('history_ms');
 }
