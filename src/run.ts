@@ -315,7 +315,8 @@ export async function main(argv: readonly string[], deps: RunDeps): Promise<0 | 
     const problem = args.kind === 'usage' ? args.problem : undefined;
     return stopWithoutRun(
       problem === undefined ? 'config' : 'usage',
-      problem ?? `baselinewatch must run from <project>/node_modules/${PACKAGE_NAME}/dist; this copy is in ${packageDirOf(deps.cliFile)}`,
+      problem ??
+        `baselinewatch must be installed from its packed .tgz into <project>/${MODULES_DIR}/${PACKAGE_NAME}, the only supported install; this copy runs from ${packageDirOf(deps.cliFile)}`,
       deps,
     );
   }
