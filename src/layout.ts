@@ -84,6 +84,15 @@ export function runIdFrom(date: Date): string {
     .replaceAll(':', '');
 }
 
+/**
+ * The file next to a pass file where the data reporter says that its metrics.csv rows were not
+ * appended: <runDir>/pass-<n>.json -> <runDir>/pass-<n>.history-error.log. Pure.
+ */
+export function historyErrorLogFor(passFile: string): string {
+  const base = path.basename(passFile, '.json');
+  return path.join(path.dirname(passFile), `${base}.history-error.log`);
+}
+
 /** Pure path computation: nothing is created or read. */
 export function runLayout(rootDir: string, run: RunContext): RunLayout {
   const artifactsDir = path.join(rootDir, 'artifacts');

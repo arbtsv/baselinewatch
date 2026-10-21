@@ -1,11 +1,14 @@
 // The Playwright reporter that turns a pass into data: it writes pass-N.json when the pass ends. It
 // is the only writer of that file. It decides nothing itself; the pure modules classify the tests
-// and build the file. Playwright loads this file by path and constructs the default export with the
+// and build the file. The metrics.csv history is best effort: when its append fails, the pass file
+// stays and pass-N.history-error.log next to it says so for the command line. Playwright loads this file by path and constructs the default export with the
 // options object that the configuration registered.
+import fs from 'node:fs';
 import type { FullConfig, FullResult, Reporter, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 import type { Baselines } from '../baselines.ts';
 import { metricGaps } from '../classify.ts';
 import { METRICS_CSV_HEADER, appendCsv, metricsCsvLines } from '../csv.ts';
+import { historyErrorLogFor } from '../layout.ts';
 import { buildPassFile, passFileText, writeFileAtomic } from '../pass-file.ts';
 import { ResultCollector } from './collect.ts';
 
@@ -54,7 +57,23 @@ export default class DataReporter implements Reporter {
     // A manual run leaves the history alone: its rows would mix hand-started runs into the record
     // of scheduled ones.
     if (!this.options.manual) {
-      appendCsv(this.options.metricsCsv, METRICS_CSV_HEADER, metricsCsvLines(runId, pass, this.collector.metricRows()));
+      try {
+        appendCsv(this.options.metricsCsv, METRICS_CSV_HEADER, metricsCsvLines(runId, pass, this.collector.metricRows()));
+      } catch (error) {
+        this.reportHistoryFailure(error);
+      }
+    }
+  }
+
+  // The pass file is the record and is already written, so a failed append must not fail the pass.
+  // The command line reads nothing else of this process, so the failure goes to a small file next to
+  // the pass file: the file name and the error code, never the message.
+  private reportHistoryFailure(error: unknown): void {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    try {
+      fs.writeFileSync(historyErrorLogFor(this.options.passFile), `metrics.csv: ${typeof code === 'string' && code !== '' ? code : 'unknown'}\n`, 'utf8');
+    } catch {
+      // Nothing more can be done; the pass file and the verdict stand.
     }
   }
 }

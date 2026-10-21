@@ -9,12 +9,12 @@ import { parseRunArgs, USAGE_LINES, type RunArgs } from './args.ts';
 import { appendCsv, RUNS_CSV_HEADER, runsCsvLine } from './csv.ts';
 import type { Locale } from './env.ts';
 import { catalogFor } from './i18n/index.ts';
-import { runIdFrom, runLayout, type RunLayout } from './layout.ts';
+import { historyErrorLogFor, runIdFrom, runLayout, type RunLayout } from './layout.ts';
 import { decide, exitLines, notReady, slowProjects, toSummary, type Decision } from './outcome.ts';
 import { readPassFile, writeFileAtomic } from './pass-file.ts';
 import type { runPrechecks } from './precheck.ts';
 import type { PassRun, PassRunOptions } from './process.ts';
-import type { NotReadyReason, Summary } from './protocol.ts';
+import type { NotReadyReason, RunWarning, Summary } from './protocol.ts';
 import { consoleSummary, internalErrorLines, notReadyLines, renderReport } from './report.ts';
 
 export type RunDeps = {
@@ -216,6 +216,15 @@ function failInternally(root: string, error: unknown, run: RunInfo | undefined, 
   return 1;
 }
 
+// A pass whose data reporter could not append its metrics.csv rows left a history error file next to
+// its pass file. The file only adds a warning; the verdict still comes from the pass files alone.
+function withHistoryWarnings(decision: Decision, passes: readonly { pass: 1 | 2; passFile: string }[]): Decision {
+  const warnings: RunWarning[] = passes
+    .filter(({ passFile }) => fs.existsSync(historyErrorLogFor(passFile)))
+    .map(({ pass }) => ({ code: 'history_not_written', pass }));
+  return warnings.length === 0 ? decision : { ...decision, warnings: [...decision.warnings, ...warnings] };
+}
+
 // The two passes: pass 1 over every project, pass 2 over the slow ones, unless an interrupt came.
 async function runPasses(
   root: string,
@@ -244,7 +253,7 @@ async function runPasses(
     const pass1 = readPassFile(run.layout.passFile, { runId, pass: 1, projects, requireAll: true });
     const requested = pass1.state === 'ok' && !interrupted ? slowProjects(pass1.file, projects) : [];
     if (requested.length === 0) {
-      return decide({ pass1, requested });
+      return withHistoryWarnings(decide({ pass1, requested }), [{ pass: 1, passFile: run.layout.passFile }]);
     }
     const layout2 = runLayout(root, { runId, pass: 2, manual: false });
     await deps.runPass({
@@ -257,7 +266,10 @@ async function runPasses(
       signal: controller.signal,
     });
     const pass2 = readPassFile(layout2.passFile, { runId, pass: 2, projects: requested, requireAll: false });
-    return decide({ pass1, pass2, requested });
+    return withHistoryWarnings(decide({ pass1, pass2, requested }), [
+      { pass: 1, passFile: run.layout.passFile },
+      { pass: 2, passFile: layout2.passFile },
+    ]);
   } finally {
     unregister();
   }
