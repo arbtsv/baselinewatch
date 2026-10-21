@@ -334,6 +334,17 @@ describe('a run that is not ready', () => {
     assert.equal(fs.existsSync(path.join(outside, 'artifacts')), false);
     assert.equal(h.passCalls.length, 0);
   });
+
+  test('the message for an unsupported install location names the supported install and the copy', async () => {
+    const outside = path.join(WORK, 'elsewhere-named');
+    fs.mkdirSync(path.join(outside, 'dist'), { recursive: true });
+    const h = harness({ root: outside, cliFile: path.join(outside, 'dist', 'cli.js') });
+    assert.equal(await main(['run'], h.deps), 3);
+    const message = h.lines.find((line) => line.includes('node_modules/baselinewatch')) ?? '';
+    assert.ok(message.includes('.tgz'), h.lines.join('\n'));
+    assert.ok(message.includes(outside), message);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=config', 'RESULT=FAIL']);
+  });
 });
 
 describe('help and version', () => {
