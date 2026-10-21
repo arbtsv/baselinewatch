@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect } from '@playwright/test';
 import { loadPortalModule } from './portal.ts';
+import { embeddedZipTexts } from './zip.ts';
 
 export const REPO_ROOT: string = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const DEMO_DIR: string = path.join(REPO_ROOT, 'examples', 'demo-portal');
@@ -174,11 +175,47 @@ export function outputLines(run: RunResult): string[] {
     .filter((line) => line.trim() !== '');
 }
 
+const BINARY_FILE = /\.(?:png|webm|zip|zst|gz)$/i;
+
+/**
+ * The text of every file under a directory, with the zip data inside an html report decoded. Unless
+ * snapshots are included, test-results and the attachment copies in html/data are left out: when an
+ * expect fails, Playwright itself writes a snapshot of the page there, with the value of every field.
+ */
+function directoryTexts(root: string, snapshots: boolean, dir: string = root): [string, string][] {
+  const texts: [string, string][] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const relative = path.relative(root, file).split(path.sep).join('/');
+      if (!snapshots && (entry.name === 'test-results' || relative.endsWith('html/data'))) continue;
+      texts.push(...directoryTexts(root, snapshots, file));
+    } else if (!BINARY_FILE.test(entry.name)) {
+      const label = path.relative(root, file);
+      const text = fs.readFileSync(file, 'utf8');
+      texts.push([label, text]);
+      if (entry.name.endsWith('.html')) {
+        const inner = embeddedZipTexts(text);
+        // A report whose data cannot be found would make this check pass for the wrong reason.
+        if (inner.length === 0) throw new Error(`no zip data found in ${label}: the report format changed`);
+        for (const [name, content] of inner) texts.push([`${label}:${name}`, content]);
+      }
+    }
+  }
+  return texts;
+}
+
 /**
  * Checks that neither the demo login nor the demo password occurs in the output of a run or, when the
- * run id is known, in the files of that run: summary.json, report.txt, both CSV files and every pass file.
+ * run id is known, in the files of that run: summary.json, report.txt, both CSV files and every file
+ * under the run directory, including the data packed inside the html report. The page snapshots that
+ * Playwright writes for a failed expect are checked only with opts.snapshots.
  */
-export async function expectNoDemoSecrets(run: RunResult, runId: string | undefined): Promise<void> {
+export async function expectNoDemoSecrets(
+  run: RunResult,
+  runId: string | undefined,
+  opts: { snapshots?: boolean } = {},
+): Promise<void> {
   const { DEMO_ACCOUNT } = await loadPortalModule();
   const texts: [string, string][] = [
     ['stdout', run.stdout],
@@ -186,15 +223,11 @@ export async function expectNoDemoSecrets(run: RunResult, runId: string | undefi
   ];
   if (runId !== undefined) {
     const files = ['summary.json', 'report.txt', 'metrics.csv', 'runs.csv'].map((name) => path.join(DEMO_ARTIFACTS_DIR, name));
-    const runDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', runId);
-    if (fs.existsSync(runDir)) {
-      for (const entry of fs.readdirSync(runDir)) {
-        if (/^pass-\d+\.json$/.test(entry)) files.push(path.join(runDir, entry));
-      }
-    }
     for (const file of files) {
       if (fs.existsSync(file)) texts.push([path.basename(file), fs.readFileSync(file, 'utf8')]);
     }
+    const runDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', runId);
+    if (fs.existsSync(runDir)) texts.push(...directoryTexts(runDir, opts.snapshots === true));
   }
   for (const [label, text] of texts) {
     expect(text.includes(DEMO_ACCOUNT.login), `the demo login is in ${label}`).toBe(false);
