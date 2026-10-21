@@ -427,6 +427,49 @@ describe('a history file that cannot be written', () => {
     assert.equal(summary.reason, 'slow');
     assert.ok(summary.warnings.some((warning) => warning.code === 'history_not_written' && warning.pass === undefined));
   });
+
+  // The data reporter in the child leaves this file next to the pass file when the append of its metric rows failed.
+  function writeHistoryError(options: PassRunOptions): void {
+    const layout = runLayout(options.root, { runId: options.runId, pass: options.pass, manual: false });
+    fs.writeFileSync(path.join(path.dirname(layout.passFile), `pass-${options.pass}.history-error.log`), 'metrics.csv: EISDIR\n');
+  }
+
+  test('a history error file of pass 1 becomes a warning of that pass and leaves the pass verdict', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+        writeHistoryError(options);
+        return CLEAN_EXIT;
+      },
+    });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.ok(!h.lines.some((line) => line.startsWith('REASON=')));
+    const summary = readSummary(h.root);
+    assert.equal(summary.status, 'pass');
+    assert.deepEqual(summary.warnings, [{ code: 'history_not_written', pass: 1 }]);
+    const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning({ code: 'history_not_written', pass: 1 })));
+  });
+
+  test('a history error file of pass 2 alone names pass 2 and the failing run keeps its reason', async () => {
+    const h = harness({
+      runPass: (options) => {
+        if (options.pass === 1) {
+          writePass(options, [project('node-1', 'slow'), project('node-2', 'ok')]);
+        } else {
+          writePass(options, [project('node-1', 'ok')]);
+          writeHistoryError(options);
+        }
+        return CLEAN_EXIT;
+      },
+    });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+    assert.deepEqual(readSummary(h.root).warnings, [{ code: 'history_not_written', pass: 2 }]);
+  });
 });
 
 describe('an exception after the run is recorded', () => {

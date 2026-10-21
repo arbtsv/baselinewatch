@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FullConfig, FullResult, Suite, TestCase, TestResult } from '@playwright/test/reporter';
 import type { Baselines } from '../src/baselines.ts';
+import { historyErrorLogFor } from '../src/layout.ts';
 import { METRIC_ANNOTATION, type PassFile } from '../src/protocol.ts';
 import DataReporter, { type DataReporterOptions } from '../src/reporters/data.ts';
 
@@ -274,5 +275,54 @@ describe('DataReporter: a run that ends before every test does', () => {
       csvLines(opts.metricsCsv).filter((line) => line.includes(',node-2,')).length,
       0,
     );
+  });
+});
+
+describe('DataReporter: a metrics.csv that cannot be written', () => {
+  test('the history error file sits next to the pass file and is named after its pass', () => {
+    assert.equal(
+      historyErrorLogFor(path.join('r', 'runs', 'X', 'pass-2.json')),
+      path.join('r', 'runs', 'X', 'pass-2.history-error.log'),
+    );
+  });
+
+  test('a scheduled pass ends without an error, keeps the pass file and names the failure in a history error file', () => {
+    // metrics.csv as a directory: every append to it fails.
+    const opts = options(freshDir());
+    fs.mkdirSync(opts.metricsCsv, { recursive: true });
+    runPass(opts, configOf('node-1', 'node-2'), [
+      [NODE_1, NODE_1_RESULT()],
+      [NODE_2, NODE_2_RESULT()],
+    ]);
+    const file = readPass(opts.passFile);
+    assert.deepEqual(
+      file.projects.map((entry) => [entry.project, entry.class]),
+      [
+        ['demo--node-1', 'ok'],
+        ['demo--node-2', 'error'],
+      ],
+    );
+    const logFile = path.join(path.dirname(opts.passFile), 'pass-1.history-error.log');
+    assert.equal(historyErrorLogFor(opts.passFile), logFile);
+    const text = fs.readFileSync(logFile, 'utf8');
+    assert.match(text, /^metrics\.csv: (E[A-Z]+|unknown)\n$/);
+    assert.equal(text.includes(PLACEHOLDER_PASSWORD), false);
+  });
+
+  test('a manual run never appends, so it writes no history error file', () => {
+    const dir = freshDir();
+    const opts = options(dir, { runId: 'manual', manual: true, passFile: path.join(dir, 'runs', 'manual', 'pass-1.json') });
+    fs.mkdirSync(opts.metricsCsv, { recursive: true });
+    runPass(opts, configOf('node-1'), [[NODE_1, NODE_1_RESULT()]]);
+    assert.equal(readPass(opts.passFile).run_id, 'manual');
+    assert.equal(fs.existsSync(historyErrorLogFor(opts.passFile)), false);
+  });
+
+  test('a writable metrics.csv leaves no history error file', () => {
+    const dir = freshDir();
+    const opts = options(dir);
+    runPass(opts, configOf('node-1'), [[NODE_1, NODE_1_RESULT()]]);
+    assert.equal(fs.existsSync(historyErrorLogFor(opts.passFile)), false);
+    assert.deepEqual(fs.readdirSync(path.dirname(opts.passFile)), ['pass-1.json']);
   });
 });

@@ -671,6 +671,41 @@ test.describe('unwritable history', () => {
       await portal.stop();
     }
   });
+
+  test('a metrics.csv that cannot be written leaves the pass verdict intact and names the pass', async () => {
+    cleanArtifacts();
+    const metricsCsv = path.join(DEMO_ARTIFACTS_DIR, 'metrics.csv');
+    fs.mkdirSync(metricsCsv, { recursive: true });
+    const portal = await startPortal('ok');
+    try {
+      const env = await demoEnv({ 'node-1': portal.url });
+      const run = await withDemoEnv(env, () => runBlw(['run'], { cwd: REPO_ROOT, timeoutMs: RUN_TIMEOUT_MS }));
+      const output = `${run.stdout}\n${run.stderr}`;
+      expect(run.timedOut).toBe(false);
+      expect(run.status, output).toBe(0);
+      const lines = outputLines(run);
+      expect(lines.at(-1), output).toBe('RESULT=PASS');
+      expect(lines.filter((line) => line.startsWith('REASON='))).toEqual([]);
+
+      const summary = readArtifactJson('summary.json') as unknown as SummaryFile;
+      expect(summary.status).toBe('pass');
+      expect(summary.reason).toBeNull();
+      expect(summary.warnings).toEqual([{ code: 'history_not_written', pass: 1 }]);
+      const runId = summary.run_id;
+      expect(runId).toMatch(RUN_ID);
+      const runDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', runId);
+      expect(readPass(runDir, 1).projects.map((item) => [item.project, item.class])).toEqual([['demo--node-1', 'ok']]);
+      expect(csvLinesFor('runs.csv', runId)).toHaveLength(1);
+      expect(csvLinesFor('runs.csv', runId)[0]).toContain(',PASS,0,,');
+      expect(fs.readFileSync(path.join(DEMO_ARTIFACTS_DIR, 'report.txt'), 'utf8')).toContain('metrics.csv');
+
+      fs.rmSync(metricsCsv, { recursive: true, force: true });
+      await expectNoDemoSecrets(run, runId);
+    } finally {
+      fs.rmSync(metricsCsv, { recursive: true, force: true });
+      await portal.stop();
+    }
+  });
 });
 
 test('locale ru changes the report text but not the machine lines', async () => {
