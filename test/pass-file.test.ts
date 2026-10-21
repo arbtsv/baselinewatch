@@ -211,6 +211,48 @@ describe('a project whose class agrees with its metrics and category', () => {
   }
 });
 
+describe('names in a pass file follow the configuration rule', () => {
+  // Every odd project id is listed as expected, so only the name rule can reject the file.
+  function withProject(scenario: string, node: string): [unknown, PassExpectation] {
+    const id = `${scenario}--${node}`;
+    const file = changed((f) => {
+      Object.assign(f.projects[0], { project: id, scenario, node });
+    });
+    return [file, { ...BOTH, projects: [id, 'demo--node-2'] }];
+  }
+
+  for (const [scenario, node] of [
+    ['con', 'node-1'],
+    ['demo', 'nul'],
+    ['demo', 'com1'],
+    ['demo', 'lpt9'],
+  ]) {
+    test(`the project ${scenario}--${node} is rejected`, () => {
+      const [file, expect] = withProject(scenario, node);
+      assert.equal(validatePassFile(file, expect), undefined);
+    });
+  }
+
+  test('a name that only starts with a device name is accepted', () => {
+    const [file, expect] = withProject('console', 'nullable');
+    assert.notEqual(validatePassFile(file, expect), undefined);
+  });
+
+  test('a not_measured entry with the node aux is rejected', () => {
+    const file = changed((f) => {
+      f.not_measured = [{ scenario: 'demo', node: 'aux', metric: 'login_ms' }];
+    });
+    assert.equal(validatePassFile(file, BOTH), undefined);
+  });
+
+  test('an unused_baselines entry with the scenario prn is rejected', () => {
+    const file = changed((f) => {
+      f.unused_baselines = [{ scenario: 'prn', node: 'node-1', metric: 'login_ms' }];
+    });
+    assert.equal(validatePassFile(file, BOTH), undefined);
+  });
+});
+
 describe('readPassFile with damaged files', () => {
   function write(name: string, text: string): string {
     const file = path.join(WORK, name);
