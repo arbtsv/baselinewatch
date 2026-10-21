@@ -88,14 +88,37 @@ function defaultHeadlessShellPath(root: string): string | undefined {
   }
 }
 
-type LaunchApi = { chromium: { launch: (options: { headless: boolean }) => Promise<{ close: () => Promise<void> }> } };
+/** How long the fallback probe waits for the headless browser to start. */
+export const BROWSER_PROBE_TIMEOUT_MS = 30_000;
+
+/** The part of Playwright's chromium object that the probe uses. */
+export type ChromiumLauncher = {
+  launch(options: { headless: boolean; timeout: number }): Promise<{ close(): Promise<void> }>;
+};
+
+/**
+ * Starts headless Chromium within timeoutMs and closes it again. A launch that worked is an installed
+ * browser, whatever the close does; a launch that fails or runs out of time is a missing one.
+ */
+export async function probeChromium(chromium: ChromiumLauncher, timeoutMs: number): Promise<boolean> {
+  let browser: Awaited<ReturnType<ChromiumLauncher['launch']>>;
+  try {
+    browser = await chromium.launch({ headless: true, timeout: timeoutMs });
+  } catch {
+    return false;
+  }
+  try {
+    await browser.close();
+  } catch {
+    // The browser started; a close that fails says nothing about the installation.
+  }
+  return true;
+}
 
 async function defaultLaunchProbe(root: string): Promise<boolean> {
   try {
-    const { chromium } = projectPlaywright(root)('playwright-core') as LaunchApi;
-    const browser = await chromium.launch({ headless: true });
-    await browser.close();
-    return true;
+    const { chromium } = projectPlaywright(root)('playwright-core') as { chromium: ChromiumLauncher };
+    return await probeChromium(chromium, BROWSER_PROBE_TIMEOUT_MS);
   } catch {
     return false;
   }
