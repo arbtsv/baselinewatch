@@ -128,6 +128,45 @@ describe('the new warnings', () => {
   });
 });
 
+describe('the launcher warning', () => {
+  const FORMS = [
+    { code: 'launcher_outdated', found: 0, expected: 1 },
+    { code: 'launcher_outdated', expected: 1 },
+  ] as const satisfies readonly RunWarning[];
+
+  test('the English sentence names the numbers, the launcher and the command', () => {
+    const [withFound, withoutFound] = FORMS.map((form) => en.warning(form)) as [string, string];
+    for (const needle of ['0', '1', 'monitor.bat', 'blw init --refresh']) {
+      assert.ok(withFound.includes(needle), `${needle}: ${withFound}`);
+    }
+    for (const needle of ['1', 'monitor.bat', 'blw init --refresh']) {
+      assert.ok(withoutFound.includes(needle), `${needle}: ${withoutFound}`);
+    }
+    assert.ok(!withoutFound.includes('undefined'), withoutFound);
+  });
+
+  test('the Russian sentence is Russian and keeps the launcher and the command as they are', () => {
+    for (const form of FORMS) {
+      const text = ru.warning(form);
+      assert.match(text, CYRILLIC);
+      assert.ok(text.includes('monitor.bat'), text);
+      assert.ok(text.includes('blw init --refresh'), text);
+      assert.ok(!text.includes('undefined'), text);
+    }
+  });
+
+  test('no form in either language holds a path separator or a file extension other than .bat', () => {
+    for (const catalog of [en, ru]) {
+      for (const form of [...FORMS, { code: 'launcher_outdated' as const }]) {
+        const text = catalog.warning(form);
+        for (const forbidden of ['/', '\\', '.json', '.log', '.csv', 'undefined']) {
+          assert.ok(!text.includes(forbidden), `${JSON.stringify(forbidden)} in ${text}`);
+        }
+      }
+    }
+  });
+});
+
 describe('machine prefixes', () => {
   test('no string value and no rendered sentence contains RESULT= or REASON=', () => {
     for (const catalog of [en, ru]) {

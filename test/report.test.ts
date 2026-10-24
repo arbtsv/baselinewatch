@@ -146,6 +146,15 @@ describe('English report', () => {
     assert.ok(text.includes('  The second look at demo / node-1 left no result.\n'));
   });
 
+  test('the outdated launcher warning is one line of the Warnings block in each language', () => {
+    const warning = { code: 'launcher_outdated' as const, found: 0, expected: 1 };
+    const english = renderReport(summaryOf({ warnings: [warning] }), en);
+    assert.ok(english.includes(`Warnings\n  ${en.warning(warning)}\n`), english);
+    const russian = renderReport(summaryOf({ locale: 'ru', warnings: [warning] }), ru);
+    assert.ok(russian.includes(`\n  ${ru.warning(warning)}\n`), russian);
+    assert.match(ru.warning(warning), CYRILLIC);
+  });
+
   test('the new warnings are written in their order as catalog sentences', () => {
     const text = renderReport(
       summaryOf({

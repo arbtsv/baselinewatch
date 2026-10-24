@@ -960,6 +960,119 @@ describe('an outdated launcher', () => {
     const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
     assert.ok(report.includes(catalogFor('en').warning(warning)));
   });
+
+  const warningsOf = (root: string): string[] => readSummary(root).warnings.map((warning) => warning.code);
+  const CYRILLIC = new RegExp(`[${String.fromCodePoint(0x0400)}-${String.fromCodePoint(0x04ff)}]`);
+
+  test('a marker equal to the template version adds no warning', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, `@echo off\r\nrem blw-template: ${TEMPLATE_VERSION}\r\n`);
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+  });
+
+  test('a marker above the template version adds no warning', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, `@echo off\r\nrem blw-template: ${TEMPLATE_VERSION + 1}\r\n`);
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+  });
+
+  test('a launcher without a marker adds the warning with expected only', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, '@echo off\r\nnode run\r\n');
+    assert.equal(await main(['run'], h.deps), 0);
+    const [warning] = readSummary(h.root).warnings;
+    assert.deepEqual(warning, { code: 'launcher_outdated', expected: TEMPLATE_VERSION });
+    assert.ok(!('found' in (warning as object)));
+  });
+
+  test('a run without any monitor.bat carries no warning', async () => {
+    const h = harness({ runPass: cleanPass });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+  });
+
+  test('a directory named monitor.bat is no reason for a warning or a failure', async () => {
+    const h = harness({ runPass: cleanPass });
+    fs.mkdirSync(path.join(h.root, LAUNCHER_FILE));
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.deepEqual(readSummary(h.root).warnings, []);
+  });
+
+  test('a not-ready run over failed checks carries the warning and keeps its exit lines', async () => {
+    const message = '[config] env.json: file not found. Create it.';
+    const h = harness({ prechecks: { ok: false, failure: { reason: 'config', message } } });
+    writeLauncher(h.root, '@echo off\r\n');
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=config', 'RESULT=FAIL']);
+    assert.ok(warningsOf(h.root).includes('launcher_outdated'));
+  });
+
+  test('a usage problem carries the warning and keeps its exit lines', async () => {
+    const h = harness({});
+    writeLauncher(h.root, '@echo off\r\n');
+    assert.equal(await main(['run', '--bogus'], h.deps), 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=usage', 'RESULT=FAIL']);
+    assert.deepEqual(warningsOf(h.root), ['launcher_outdated']);
+  });
+
+  test('a failing run carries the warning and keeps exit 1 with its reason', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, [project('node-1', 'error'), project('node-2', 'ok')]);
+        return CLEAN_EXIT;
+      },
+    });
+    writeLauncher(h.root, '@echo off\r\n');
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=error', 'RESULT=FAIL']);
+    assert.deepEqual(warningsOf(h.root), ['launcher_outdated']);
+  });
+
+  test('over a dead lock the warnings come in the order lock_taken_over, launcher_outdated', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, '@echo off\r\n');
+    fs.mkdirSync(artifacts(h.root), { recursive: true });
+    fs.writeFileSync(
+      path.join(artifacts(h.root), '.lock'),
+      `${JSON.stringify({ pid: 7777, started_at: '2026-10-20T09:59:00.000Z', run_id: '20261020T095900Z' })}\n`,
+    );
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(warningsOf(h.root), ['lock_taken_over', 'launcher_outdated']);
+  });
+
+  test('the Russian report carries the Russian sentence', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('ru') });
+    writeLauncher(h.root, '@echo off\r\nrem blw-template: 0\r\n');
+    assert.equal(await main(['run'], h.deps), 0);
+    const sentence = catalogFor('ru').warning({ code: 'launcher_outdated', found: 0, expected: TEMPLATE_VERSION });
+    assert.match(sentence, CYRILLIC);
+    assert.ok(fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8').includes(sentence));
+  });
+
+  test('the console output ends the same with and without an outdated launcher', async () => {
+    const failing = (options: PassRunOptions): PassRun => {
+      writePass(options, [project('node-1', 'error'), project('node-2', 'ok')]);
+      return CLEAN_EXIT;
+    };
+    const plain = harness({ runPass: failing });
+    const outdated = harness({ runPass: failing });
+    writeLauncher(outdated.root, '@echo off\r\n');
+    assert.equal(await main(['run'], plain.deps), await main(['run'], outdated.deps));
+    assert.deepEqual(outdated.lines.slice(-2), plain.lines.slice(-2));
+  });
+
+  test('neither the summary nor the report holds a line of the launcher', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, '@echo off\r\nrem odd-launcher-line-xyz\r\n');
+    assert.equal(await main(['run'], h.deps), 0);
+    const files = [path.join(artifacts(h.root), 'summary.json'), path.join(artifacts(h.root), 'report.txt')];
+    for (const file of files) {
+      assert.ok(!fs.readFileSync(file, 'utf8').includes('odd-launcher-line-xyz'), file);
+    }
+  });
 });
 
 describe('retention', () => {
