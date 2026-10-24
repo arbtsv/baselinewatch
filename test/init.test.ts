@@ -6,9 +6,26 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { USAGE_LINES } from '../src/args.ts';
 import { renderTemplate, runInit, TEMPLATE_FILES, VERSION_TOKEN, type InitDeps } from '../src/init.ts';
+import { writeFileAtomic } from '../src/pass-file.ts';
 import { main, type RunDeps } from '../src/run.ts';
+import { TEMPLATE_VERSION } from '../src/template-version.ts';
+
+// The template version and the SHA-256 of every template-owned source file under templates/. A refresh
+// rewrites these files in projects that already exist, so a change to one of them needs a decision.
+// If this record fails, a template-owned file changed: when the change matters to an existing project,
+// raise TEMPLATE_VERSION in src/template-version.ts and the marker in both monitor.bat copies, then
+// record the new version and hashes here. The bytes are fixed by .gitattributes (CRLF for the launcher,
+// LF for gitignore) on every OS.
+const TEMPLATE_RECORD = {
+  version: 1,
+  sha256: {
+    'monitor.bat': '2d54ac3845ae51a09d47a998220020fdbd4eda46534f097c9b1bfd93745a8cb6',
+    gitignore: '0be9e1c74e339972ba35aa2712b29955e2e354c742c5d67ae451e7eb265e37c5',
+  },
+} as const;
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-init-'));
@@ -419,6 +436,377 @@ describe('refresh', () => {
     );
     assert.equal(harness.interruptHooks + harness.exitHooks, 0);
   });
+});
+
+type RefreshOptions = { cwd?: string; version?: string; replaceFile?: InitDeps['replaceFile'] };
+
+// Runs a refresh with the real templates and collects what it printed; an exception is reported as a code.
+function refresh(dir: string | undefined, options: RefreshOptions = {}): InitResult {
+  const lines: string[] = [];
+  const deps: InitDeps = {
+    packageDir: REPO_ROOT,
+    version: options.version ?? REPO_VERSION,
+    cwd: options.cwd ?? WORK,
+    print: (line) => {
+      lines.push(line);
+    },
+  };
+  if (options.replaceFile !== undefined) {
+    deps.replaceFile = options.replaceFile;
+  }
+  try {
+    return { code: runInit({ dir, refresh: true }, deps), lines };
+  } catch (error) {
+    return { code: `threw: ${(error as Error).message}`, lines };
+  }
+}
+
+// A project made by init: every file is as the templates write it.
+function projectInto(name: string): string {
+  const dir = freshDir(name);
+  const result = initInto(dir);
+  assert.equal(result.code, 0, result.lines.join('\n'));
+  return dir;
+}
+
+const OWNED = [
+  { target: 'monitor.bat', source: 'monitor.bat' },
+  { target: '.gitignore', source: 'gitignore' },
+] as const;
+type OwnedState = 'missing' | 'outdated' | 'current';
+const STATES: readonly OwnedState[] = ['missing', 'outdated', 'current'];
+const ACTION: Record<OwnedState, string> = { missing: 'create', outdated: 'replace', current: 'up to date' };
+
+function setState(dir: string, owned: (typeof OWNED)[number], state: OwnedState): void {
+  const file = path.join(dir, owned.target);
+  if (state === 'missing') {
+    fs.rmSync(file);
+  } else if (state === 'outdated') {
+    fs.writeFileSync(file, `an older ${owned.target}\r\n`);
+  } else {
+    fs.writeFileSync(file, templateBytes(owned.source));
+  }
+}
+
+const listLine = (action: string, target: string): string => `  ${action.padEnd(10)}  ${target}`;
+const namesOf = (entries: readonly string[]): string[] => entries.map((entry) => entry.split(' ')[0] as string);
+
+describe('refresh scope', () => {
+  test('a missing .gitignore is created from the template', () => {
+    const dir = projectInto('refresh-create-one');
+    fs.rmSync(path.join(dir, '.gitignore'));
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(listed(result.lines), [listLine('up to date', 'monitor.bat'), listLine('create', '.gitignore')]);
+    assert.ok(fs.readFileSync(path.join(dir, '.gitignore')).equals(templateBytes('gitignore')));
+    assert.equal(result.lines.at(-1), 'Done: 1 written, 1 up to date.');
+  });
+
+  test('both template files missing are two create lines, the launcher first', () => {
+    const dir = projectInto('refresh-create-both');
+    fs.rmSync(path.join(dir, '.gitignore'));
+    fs.rmSync(path.join(dir, 'monitor.bat'));
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(listed(result.lines), [listLine('create', 'monitor.bat'), listLine('create', '.gitignore')]);
+    assert.equal(result.lines.at(-1), 'Done: 2 written, 0 up to date.');
+    assert.ok(fs.readFileSync(path.join(dir, 'monitor.bat')).equals(templateBytes('monitor.bat')));
+  });
+
+  test('files equal to their templates are up to date and nothing is written', () => {
+    const dir = projectInto('refresh-current');
+    const before = snapshot(dir);
+    const calls: string[] = [];
+    const result = refresh(dir, {
+      replaceFile: (file) => {
+        calls.push(file);
+      },
+    });
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(result.lines, [
+      `Refreshing the template files in ${dir}:`,
+      listLine('up to date', 'monitor.bat'),
+      listLine('up to date', '.gitignore'),
+      'Done: 0 written, 2 up to date.',
+    ]);
+    assert.deepEqual(calls, [], 'no file is rewritten when it already equals its template');
+    assert.deepEqual(snapshot(dir), before);
+  });
+
+  test('a hand-edited .gitignore is replaced whole, with no backup and no temporary file', () => {
+    const dir = projectInto('refresh-edited-gitignore');
+    const names = fs.readdirSync(dir).sort();
+    fs.appendFileSync(path.join(dir, '.gitignore'), 'notes/\n');
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(listed(result.lines), [listLine('up to date', 'monitor.bat'), listLine('replace', '.gitignore')]);
+    assert.ok(fs.readFileSync(path.join(dir, '.gitignore')).equals(templateBytes('gitignore')));
+    assert.deepEqual(fs.readdirSync(dir).sort(), names);
+  });
+
+  test('a .gitignore that differs only in CR LF line ends is replaced', () => {
+    const dir = projectInto('refresh-crlf');
+    const text = templateBytes('gitignore').toString('latin1').replaceAll('\n', '\r\n');
+    fs.writeFileSync(path.join(dir, '.gitignore'), text, 'latin1');
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(listed(result.lines), [listLine('up to date', 'monitor.bat'), listLine('replace', '.gitignore')]);
+    assert.ok(fs.readFileSync(path.join(dir, '.gitignore')).equals(templateBytes('gitignore')));
+  });
+
+  test('an empty monitor.bat is replaced', () => {
+    const dir = projectInto('refresh-empty-launcher');
+    fs.writeFileSync(path.join(dir, 'monitor.bat'), '');
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.deepEqual(listed(result.lines), [listLine('replace', 'monitor.bat'), listLine('up to date', '.gitignore')]);
+    assert.ok(fs.readFileSync(path.join(dir, 'monitor.bat')).equals(templateBytes('monitor.bat')));
+  });
+
+  for (const first of STATES) {
+    for (const second of STATES) {
+      test(`the lines and the writes keep the manifest order: launcher ${first}, .gitignore ${second}`, () => {
+        const dir = projectInto('refresh-order');
+        setState(dir, OWNED[0], first);
+        setState(dir, OWNED[1], second);
+        const written: string[] = [];
+        const result = refresh(dir, {
+          replaceFile: (file, bytes) => {
+            written.push(path.basename(file));
+            writeFileAtomic(file, bytes);
+          },
+        });
+        assert.equal(result.code, 0, result.lines.join('\n'));
+        assert.deepEqual(listed(result.lines), [listLine(ACTION[first], 'monitor.bat'), listLine(ACTION[second], '.gitignore')]);
+        assert.deepEqual(written, [first === 'current' ? [] : ['monitor.bat'], second === 'current' ? [] : ['.gitignore']].flat());
+        const count = [first, second].filter((state) => state !== 'current').length;
+        assert.equal(result.lines.at(-1), `Done: ${count} written, ${2 - count} up to date.`);
+        for (const owned of OWNED) {
+          assert.ok(fs.readFileSync(path.join(dir, owned.target)).equals(templateBytes(owned.source)), `${owned.target} equals its template`);
+        }
+      });
+    }
+  }
+
+  test('the list is printed before the first write', () => {
+    const dir = projectInto('refresh-list-first');
+    setState(dir, OWNED[0], 'outdated');
+    setState(dir, OWNED[1], 'outdated');
+    const events: string[] = [];
+    const code = runInit(
+      { dir, refresh: true },
+      {
+        packageDir: REPO_ROOT,
+        version: REPO_VERSION,
+        cwd: WORK,
+        print: (line) => {
+          events.push(line.startsWith('  ') ? 'listed' : line.startsWith('Done') ? 'done' : 'header');
+        },
+        replaceFile: (file, bytes) => {
+          events.push('write');
+          writeFileAtomic(file, bytes);
+        },
+      },
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(events, ['header', 'listed', 'listed', 'write', 'write', 'done']);
+  });
+
+  test('scenarios, env.json, baselines.json, package.json and vendor keep their bytes and nothing else appears', () => {
+    const dir = projectInto('refresh-snapshot');
+    fs.writeFileSync(path.join(dir, 'scenarios', 'extra.spec.ts'), '// my own scenario\n');
+    fs.writeFileSync(path.join(dir, 'env.json'), '{"login":"demo-user","password":"placeholder-password"}\n');
+    fs.writeFileSync(path.join(dir, 'baselines.json'), '{"demo":{"login_ms":300}}\n');
+    fs.appendFileSync(path.join(dir, 'package.json'), '\n');
+    fs.appendFileSync(path.join(dir, 'playwright.config.ts'), '// mine\n');
+    fs.writeFileSync(path.join(dir, 'vendor', 'baselinewatch-0.1.0.tgz'), 'packed');
+    fs.mkdirSync(path.join(dir, 'artifacts'));
+    fs.writeFileSync(path.join(dir, 'artifacts', 'runs.csv'), 'run_id\n');
+    setState(dir, OWNED[0], 'outdated');
+    setState(dir, OWNED[1], 'outdated');
+    const before = snapshot(dir);
+    const ownedPaths = ['monitor.bat', '.gitignore'];
+    const untouched = (entries: readonly string[]): string[] => entries.filter((entry) => !ownedPaths.includes(entry.split(' ')[0] as string));
+
+    const result = refresh(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    const after = snapshot(dir);
+    assert.deepEqual(namesOf(after), namesOf(before), 'the recursive file list is the same');
+    assert.deepEqual(untouched(after), untouched(before), 'every other file keeps its bytes');
+    for (const owned of OWNED) {
+      assert.ok(fs.readFileSync(path.join(dir, owned.target)).equals(templateBytes(owned.source)));
+    }
+  });
+
+  test('without a directory it refreshes the current directory', () => {
+    const dir = projectInto('refresh-cwd');
+    setState(dir, OWNED[0], 'outdated');
+    const result = refresh(undefined, { cwd: dir });
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.equal(result.lines[0], `Refreshing the template files in ${dir}:`);
+    assert.ok(fs.readFileSync(path.join(dir, 'monitor.bat')).equals(templateBytes('monitor.bat')));
+  });
+
+  test('a relative directory is resolved against the current directory', () => {
+    const dir = projectInto('refresh-relative');
+    setState(dir, OWNED[1], 'outdated');
+    const result = refresh(path.basename(dir), { cwd: WORK });
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.ok(fs.readFileSync(path.join(dir, '.gitignore')).equals(templateBytes('gitignore')));
+  });
+
+  test('a version that cannot name a vendored package does not stop a refresh', () => {
+    const dir = projectInto('refresh-unknown-version');
+    setState(dir, OWNED[0], 'outdated');
+    const result = refresh(dir, { version: 'unknown' });
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    assert.ok(fs.readFileSync(path.join(dir, 'monitor.bat')).equals(templateBytes('monitor.bat')));
+  });
+
+  test('a write that fails stops the refresh with its file named, and a file already replaced stays whole', () => {
+    const dir = projectInto('refresh-write-fails');
+    setState(dir, OWNED[0], 'outdated');
+    setState(dir, OWNED[1], 'outdated');
+    let calls = 0;
+    const result = refresh(dir, {
+      replaceFile: (file, bytes) => {
+        calls += 1;
+        if (calls === 2) {
+          throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        }
+        writeFileAtomic(file, bytes);
+      },
+    });
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.equal(result.lines.at(-1), 'blw init --refresh: writing .gitignore failed (EACCES).');
+    assert.ok(fs.readFileSync(path.join(dir, 'monitor.bat')).equals(templateBytes('monitor.bat')));
+    assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), 'an older .gitignore\r\n');
+  });
+});
+
+describe('refresh refusals', () => {
+  test('an empty directory is not a project: both files are named, nothing is written', () => {
+    const dir = freshDir('refresh-empty');
+    fs.mkdirSync(dir);
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.equal(result.lines.length, 1);
+    assert.ok((result.lines[0] ?? '').includes('package.json and playwright.config.ts missing'), result.lines.join('\n'));
+    assert.ok((result.lines[0] ?? '').includes('Nothing was written'), result.lines.join('\n'));
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
+  test('a directory with only package.json names playwright.config.ts alone', () => {
+    const dir = freshDir('refresh-half');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    const line = result.lines[0] ?? '';
+    assert.ok(line.includes('playwright.config.ts missing'), line);
+    assert.equal(line.includes('package.json'), false, line);
+    assert.deepEqual(fs.readdirSync(dir), ['package.json']);
+  });
+
+  test('a package.json that is a directory does not count as a project file', () => {
+    const dir = projectInto('refresh-package-dir');
+    fs.rmSync(path.join(dir, 'package.json'));
+    fs.mkdirSync(path.join(dir, 'package.json'));
+    setState(dir, OWNED[0], 'outdated');
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.ok((result.lines[0] ?? '').includes('package.json missing'), result.lines.join('\n'));
+    assert.equal(fs.readFileSync(path.join(dir, 'monitor.bat'), 'utf8'), 'an older monitor.bat\r\n');
+  });
+
+  test('a directory that does not exist is refused and is not created', () => {
+    const dir = freshDir('refresh-absent');
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.ok(result.lines.some((line) => line.includes('Nothing was written')), result.lines.join('\n'));
+    assert.equal(fs.existsSync(dir), false);
+  });
+
+  test('a directory named monitor.bat is refused before anything is listed or written', () => {
+    const dir = projectInto('refresh-launcher-dir');
+    fs.rmSync(path.join(dir, 'monitor.bat'));
+    fs.mkdirSync(path.join(dir, 'monitor.bat'));
+    setState(dir, OWNED[1], 'outdated');
+    const before = snapshot(dir);
+    const calls: string[] = [];
+    const result = refresh(dir, {
+      replaceFile: (file) => {
+        calls.push(file);
+      },
+    });
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.ok(result.lines.some((line) => line.includes('monitor.bat') && line.includes('Nothing was written')), result.lines.join('\n'));
+    assert.equal(result.lines.some((line) => line.startsWith('Refreshing')), false);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(snapshot(dir), before, 'the outdated .gitignore is not written either');
+  });
+
+  test('a link named .gitignore is refused, an outdated launcher is not written and the link target is untouched', () => {
+    const dir = projectInto('refresh-gitignore-link');
+    const outside = freshDir('refresh-link-outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'precious.txt'), 'keep me');
+    fs.rmSync(path.join(dir, '.gitignore'));
+    link(outside, path.join(dir, '.gitignore'));
+    setState(dir, OWNED[0], 'outdated');
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.ok(result.lines.some((line) => line.includes('.gitignore') && line.includes('Nothing was written')), result.lines.join('\n'));
+    assert.equal(fs.readFileSync(path.join(dir, 'monitor.bat'), 'utf8'), 'an older monitor.bat\r\n');
+    assert.deepEqual(fs.readdirSync(outside), ['precious.txt']);
+    assert.equal(fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8'), 'keep me');
+  });
+
+  test('a link named monitor.bat is refused and the link target is untouched', () => {
+    const dir = projectInto('refresh-launcher-link');
+    const outside = freshDir('refresh-launcher-outside');
+    fs.mkdirSync(outside);
+    fs.rmSync(path.join(dir, 'monitor.bat'));
+    link(outside, path.join(dir, 'monitor.bat'));
+    const result = refresh(dir);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    assert.deepEqual(fs.readdirSync(outside), []);
+  });
+});
+
+describe('refresh arguments through main', () => {
+  test('init --refresh in an empty directory exits 1 and prints no machine line', async () => {
+    const cwd = freshDir('refresh-main-empty');
+    fs.mkdirSync(cwd);
+    const harness = initDeps(path.join(REPO_ROOT, 'src', 'cli.ts'), cwd);
+    assert.equal(await main(['init', '--refresh'], harness.deps), 1);
+    assert.ok(harness.lines.some((line) => line.includes('is not a monitoring project')), harness.lines.join('\n'));
+    assert.equal(harness.lines.some((line) => line.startsWith('RESULT=') || line.startsWith('REASON=')), false);
+    assert.deepEqual(fs.readdirSync(cwd), []);
+  });
+});
+
+describe('the record of the template-owned files', () => {
+  const ownedSources = TEMPLATE_FILES.filter((file) => file.owner === 'template').map((file) => file.source);
+
+  test('the recorded version is the template version of the core', () => {
+    assert.equal(TEMPLATE_RECORD.version, TEMPLATE_VERSION, 'raise TEMPLATE_VERSION and the record together');
+  });
+
+  test('the record lists exactly the template-owned sources', () => {
+    assert.deepEqual(Object.keys(TEMPLATE_RECORD.sha256).sort(), [...ownedSources].sort());
+  });
+
+  for (const source of ownedSources) {
+    test(`the SHA-256 of templates/${source} equals the record`, () => {
+      const actual = createHash('sha256').update(templateBytes(source)).digest('hex');
+      assert.equal(
+        actual,
+        (TEMPLATE_RECORD.sha256 as Record<string, string>)[source],
+        `templates/${source} changed: when the change matters to an existing project raise TEMPLATE_VERSION in src/template-version.ts and the marker in both monitor.bat copies, then record the new hashes here`,
+      );
+    });
+  }
 });
 
 // The numbers of a version or of a comparator operand, a missing part counting as zero.

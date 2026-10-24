@@ -32,6 +32,20 @@ describe('parseRunArgs', () => {
     assert.deepEqual(parseRunArgs(['-h', '--bogus']), { kind: 'help' });
   });
 
+  test('run --refresh is a usage problem that names the option', () => {
+    const parsed = parseRunArgs(['run', '--refresh']);
+    assert.equal(parsed.kind, 'usage');
+    assert.ok(parsed.kind === 'usage' && parsed.problem.includes('--refresh'), 'the problem names --refresh');
+  });
+
+  test('a value on init --refresh is an init usage problem that names the option but not the value', () => {
+    const parsed = parseRunArgs(['init', '--refresh=secret-looking-value']);
+    assert.equal(parsed.kind, 'init_usage');
+    const problem = parsed.kind === 'init_usage' ? parsed.problem : '';
+    assert.ok(problem.includes('--refresh'), problem);
+    assert.equal(problem.includes('secret-looking-value'), false, problem);
+  });
+
   test('init alone writes into the current directory', () => {
     assert.deepEqual(parseRunArgs(['init']), { kind: 'init', dir: undefined, refresh: false });
   });
