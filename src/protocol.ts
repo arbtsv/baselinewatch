@@ -124,6 +124,24 @@ export const RESULT_LINE_PREFIX = 'RESULT=' as const;
 /** Start of the reason line a run prints for a scheduler. */
 export const REASON_LINE_PREFIX = 'REASON=' as const;
 
+/**
+ * True for a line that is exactly "RESULT=<token>" or "REASON=<token>" with a token of the fixed
+ * vocabulary above: the machine lines a scheduler reads. Redaction leaves them alone, because a login or
+ * password that is a substring of a token (a login "lock" in "REASON=locked") would rewrite the line the
+ * scheduler parses. They carry no account value: the tokens are fixed words, never input. A line that
+ * only looks like one (another value after the prefix, text around it) is not a machine line.
+ */
+export function isMachineLine(line: string): boolean {
+  if (line.startsWith(RESULT_LINE_PREFIX)) {
+    return (RESULT_TOKENS as readonly string[]).includes(line.slice(RESULT_LINE_PREFIX.length));
+  }
+  if (line.startsWith(REASON_LINE_PREFIX)) {
+    const token = line.slice(REASON_LINE_PREFIX.length);
+    return (NOT_READY_REASONS as readonly string[]).includes(token) || (FAIL_REASONS as readonly string[]).includes(token);
+  }
+  return false;
+}
+
 /** One baseline metric of one node, named in a metric gap list. */
 export type MetricRef = { scenario: string; node: string; metric: string };
 

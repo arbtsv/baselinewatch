@@ -122,6 +122,8 @@ function harness(options: {
   duringPrechecks?: () => void;
   /** A failing fake check still calls the onEnv hook first, as a check that fails after env.json loaded does. */
   accountKnown?: boolean;
+  /** With accountKnown: the account the failed checks already knew (the default one when not given). */
+  knownAccount?: { login: string; password: string };
   /** The platform the run believes it is on; win32 by default, so the zip step runs everywhere. */
   platform?: NodeJS.Platform;
   /** What the fake tar does: write a zip (default), leave a partial zip and exit 1, or write a plain tar and exit 0. */
@@ -176,7 +178,7 @@ function harness(options: {
       if (result.ok) {
         hooks?.onEnv?.(result.value.env);
       } else if (options.accountKnown === true) {
-        hooks?.onEnv?.(checked().value.env);
+        hooks?.onEnv?.(checked('en', 30, options.knownAccount).value.env);
       }
       return result;
     },
@@ -1157,6 +1159,34 @@ describe('redaction', () => {
     assert.ok(fs.readFileSync(first.passFile).equals(passBytes as Buffer));
     assert.ok(fs.readFileSync(first.passFile, 'utf8').includes('"node"'));
     assert.equal(readSummary(h.root).nodes[0]?.recheck, 'ok');
+  });
+
+  // The machine lines are what a scheduler reads: a login or password that is a substring of one of
+  // their words must not rewrite them, whatever else is redacted.
+  for (const login of ['slow', 'low', 'FAIL', 'REASON', 'RESULT', 'AIL']) {
+    test(`a login "${login}" that sits inside the machine lines leaves RESULT= and REASON= as they are`, async () => {
+      const h = harness({
+        runPass: (options) => {
+          writePass(options, options.pass === 1 ? [project('node-1', 'slow'), project('node-2', 'ok')] : [project('node-1', 'ok')]);
+          return CLEAN_EXIT;
+        },
+        prechecks: checked('en', 30, { login, password: PASSWORD }),
+      });
+      assert.equal(await main(['run'], h.deps), 1);
+      assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+    });
+  }
+
+  test('a login that sits inside a not-ready reason leaves REASON= as it is and still hides the login elsewhere', async () => {
+    const message = '[config] baselines.json: the config of lock is unknown';
+    const h = harness({
+      prechecks: { ok: false, failure: { reason: 'config', message } },
+      accountKnown: true,
+      knownAccount: { login: 'config', password: PASSWORD },
+    });
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=config', 'RESULT=FAIL']);
+    assert.ok(h.lines.some((line) => line.startsWith('[***]')), h.lines.join('\n'));
   });
 
   test('a configuration failure after env.json loaded prints its message with the login replaced', async () => {

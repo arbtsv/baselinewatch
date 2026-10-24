@@ -72,6 +72,24 @@ async function runAgainst(
 }
 
 test.describe('zip and redaction', () => {
+  test('a login that is a word of the machine lines leaves RESULT= and REASON= intact', async () => {
+    // The portal refuses the login, so the run ends with REASON=error after env.json was loaded and the
+    // console redactor was attached; a login "error" must not rewrite the line the scheduler reads.
+    cleanArtifacts();
+    const portal = await startPortal('loginError');
+    try {
+      const env = await demoEnv({ 'node-1': portal.url });
+      env.account.login = 'error';
+      const run = await withDemoEnv(env, () => runBlw(['run'], { cwd: REPO_ROOT, timeoutMs: RUN_TIMEOUT_MS }));
+      const output = `${run.stdout}\n${run.stderr}`;
+      expect(run.timedOut).toBe(false);
+      expect(run.status, output).toBe(1);
+      expect(outputLines(run).slice(-2), output).toEqual(['REASON=error', 'RESULT=FAIL']);
+    } finally {
+      await portal.stop();
+    }
+  });
+
   test('a broken page run redacts the page snapshot and packs a zip without the html report', async () => {
     const { DEMO_ACCOUNT } = await loadPortalModule();
     const { run, summary, runId, runDir } = await runAgainst('broken');

@@ -22,7 +22,7 @@ import { readPassFile, writeFileAtomic } from './pass-file.ts';
 import type { runPrechecks } from './precheck.ts';
 import { applyRetention } from './retention.ts';
 import type { PassRun, PassRunOptions } from './process.ts';
-import type { NotReadyReason, RunWarning, Summary } from './protocol.ts';
+import { isMachineLine, type NotReadyReason, type RunWarning, type Summary } from './protocol.ts';
 import { createRedactor, redactRunDirectory, type Redactor } from './redact.ts';
 import { consoleSummary, internalErrorLines, notReadyLines, renderReport } from './report.ts';
 
@@ -424,7 +424,8 @@ async function runPasses(
 function hideAccount(run: RunInfo, account: Account, deps: RunDeps, state: RunState): void {
   const redactor = createRedactor(account);
   run.redactor = redactor;
-  state.detach = deps.attachRedactor((line) => redactor.text(line));
+  // The machine lines (RESULT=, REASON=) pass unchanged: see isMachineLine.
+  state.detach = deps.attachRedactor((line) => (isMachineLine(line) ? line : redactor.text(line)));
   for (const field of redactor.tooShort) {
     run.warnings.push({ code: 'secret_too_short', field });
   }
