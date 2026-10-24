@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ConfigError } from '../src/errors.ts';
 import { createMeasure, finishMessage, slowMessage, type MeasureDeps, type MeasureSession } from '../src/measure.ts';
+import * as protocol from '../src/protocol.ts';
 import {
   MASK_COLOR,
   SCREENSHOT_TIMEOUT_MS,
@@ -270,6 +271,60 @@ describe('measure: checks before fn runs', () => {
       assert.equal(h.calls(), 0);
     });
   }
+});
+
+describe('measure: names that hold an account value', () => {
+  const ENTRY = { reference_ms: 300, maxRatio: 3 };
+  const WITH_OPS = { ...BASELINES, opsview_page_ms: ENTRY, ops_page_ms: ENTRY };
+
+  test('the redaction minimum length is three characters', () => {
+    assert.equal(protocol.MIN_REDACT_LENGTH, 3);
+  });
+
+  test('a short login rejects a whole-word name with the generic sentence before fn runs', async () => {
+    const h = harness([], { account: { login: 'ops', password: 'pw_secret_9' }, baselines: WITH_OPS });
+    const error = await rejection(h.session.measure('ops_page_ms', h.fn(null)));
+    assert.ok(!(error instanceof ConfigError));
+    assert.ok(error.message.includes('login or password'), error.message);
+    assert.ok(!error.message.includes('ops_page_ms'), error.message);
+    assert.equal(h.calls(), 0);
+    assert.deepEqual(h.titles, []);
+  });
+
+  test('a login of three characters rejects a name that only starts with it, before fn runs', async () => {
+    const h = harness([], { account: { login: 'ops', password: 'pw_secret_9' }, baselines: WITH_OPS });
+    const error = await rejection(h.session.measure('opsview_page_ms', h.fn(null)));
+    assert.ok(error.message.includes('login or password'), error.message);
+    assert.ok(!error.message.includes('opsview_page_ms'), error.message);
+    assert.equal(h.calls(), 0);
+    assert.deepEqual(h.titles, []);
+  });
+
+  test('a login of two characters still measures a name that only starts with it', async () => {
+    const baselines = { ...BASELINES, opview_page_ms: ENTRY };
+    const h = harness([0, 10], { account: { login: 'op', password: 'pw_secret_9' }, baselines });
+    await h.session.measure('opview_page_ms', h.fn(null));
+    assert.deepEqual(h.titles, ['opview_page_ms']);
+    assert.equal(h.annotated.length, 1);
+  });
+
+  test('a name that fails the metric rule and holds a login with a hyphen is rejected without the name', async () => {
+    const h = harness([], { account: { login: 'demo-operator', password: 'pw_secret_9' } });
+    for (const name of ['demo-operator_ms', 'Demo-Operator_ms']) {
+      const error = await rejection(h.session.measure(name, h.fn(null)));
+      assert.ok(!error.message.toLowerCase().includes('demo-operator'), error.message);
+    }
+    assert.equal(h.calls(), 0);
+  });
+
+  test('a name without any account value keeps the descriptive no-baseline and twice messages', async () => {
+    const h = harness([0, 10]);
+    const missing = await rejection(h.session.measure('unknown_ms', h.fn(null)));
+    assert.ok(missing.message.includes('"unknown_ms"'), missing.message);
+    await h.session.measure('login_ms', h.fn(null));
+    const twice = await rejection(h.session.measure('login_ms', h.fn(null)));
+    assert.ok(twice.message.includes('"login_ms"'), twice.message);
+  });
 });
 
 describe('slowMessage and finishMessage', () => {

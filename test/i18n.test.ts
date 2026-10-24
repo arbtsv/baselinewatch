@@ -26,7 +26,10 @@ const REASONS: readonly Reason[] = [...NOT_READY_REASONS, ...FAIL_REASONS];
 const WARNINGS: RunWarning[] = WARNING_CODES.flatMap((code) => [
   { code, pass: 2 as const, scenario: 'demo', node: 'node-1' },
   { code },
+  { code, field: 'login' as const, count: 3 },
 ]);
+
+const NEW_CODES = ['lock_taken_over', 'retention_failed', 'secret_too_short', 'binary_left_out', 'zip_skipped', 'zip_failed'] as const;
 
 // Every sentence of a catalog rendered for every token: [label, rendered text, expected token].
 function samples(catalog: Catalog): { label: string; text: string; token?: string }[] {
@@ -85,6 +88,35 @@ describe('catalog completeness', () => {
         }
       }
     }
+  });
+});
+
+describe('the new warnings', () => {
+  test('the vocabulary holds the six new codes after the earlier three', () => {
+    assert.deepEqual(WARNING_CODES.slice(3), NEW_CODES);
+  });
+
+  test('the new warnings name no path, file and value', () => {
+    for (const [language, catalog] of [['en', en], ['ru', ru]] as const) {
+      for (const code of NEW_CODES) {
+        const text = catalog.warning({ code, field: 'password', count: 7 });
+        for (const forbidden of ['/', '\\', '.log', '.json', '.csv', 'placeholder']) {
+          assert.ok(!text.includes(forbidden), `${language} ${code} holds ${JSON.stringify(forbidden)}: ${text}`);
+        }
+        if (code === 'retention_failed' || code === 'binary_left_out') {
+          assert.ok(text.includes('7'), `${language} ${code}: ${text}`);
+        }
+      }
+    }
+    assert.ok(en.warning({ code: 'secret_too_short', field: 'password' }).includes('password'));
+    assert.match(ru.warning({ code: 'secret_too_short', field: 'password' }), CYRILLIC);
+  });
+
+  test('the field and the count decide the wording, and a missing one still renders', () => {
+    assert.ok(en.warning({ code: 'secret_too_short', field: 'login' }).includes('login'));
+    assert.ok(en.warning({ code: 'secret_too_short' }).includes('login or password'));
+    assert.ok(en.warning({ code: 'retention_failed' }).includes('?'));
+    assert.notEqual(ru.warning({ code: 'secret_too_short', field: 'login' }), ru.warning({ code: 'secret_too_short', field: 'password' }));
   });
 });
 

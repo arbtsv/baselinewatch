@@ -1,5 +1,8 @@
 // The Playwright-bound shell: option fixtures set by the project config, the account fixture, the
 // measure and fillSecret fixtures, and the end-of-test check that turns slow steps into one error.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test as base, expect, type Locator } from '@playwright/test';
 import { loadEnv, type Account } from './env.ts';
 import {
@@ -191,12 +194,23 @@ export const test = base.extend<
   blwFinish: [
     async ({ page, blwTestState }, use, testInfo) => {
       await use();
+      // One screenshot per test in every outcome, taken with the masks and attached as a file, so the
+      // run directory and the zip carry it. The bytes go through a private temporary directory outside
+      // the output directory of the test: Playwright copies a path attachment into the test output
+      // while attaching, and a file written under the output directory would stay as a second copy.
       // A failed screenshot is an ordinary test error. The slow error is added only to a test that
       // would otherwise pass, so a failed test never carries it; the slow verdicts stay in the
       // annotations either way. Only the default page is captured.
       try {
         const body = await page.screenshot(screenshotOptions(blwTestState.masks));
-        await testInfo.attach(SCREENSHOT_ATTACHMENT, { body, contentType: 'image/png' });
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-shot-'));
+        try {
+          const file = path.join(directory, 'screenshot.png');
+          fs.writeFileSync(file, body);
+          await testInfo.attach(SCREENSHOT_ATTACHMENT, { path: file, contentType: 'image/png' });
+        } finally {
+          fs.rmSync(directory, { recursive: true, force: true });
+        }
       } finally {
         await emptyFields(blwTestState.secrets);
       }

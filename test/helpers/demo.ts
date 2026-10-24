@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect } from '@playwright/test';
 import { loadPortalModule } from './portal.ts';
-import { embeddedZipTexts } from './zip.ts';
+import { embeddedZipTexts, unzipEntries } from './zip.ts';
 
 export const REPO_ROOT: string = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const DEMO_DIR: string = path.join(REPO_ROOT, 'examples', 'demo-portal');
@@ -177,10 +177,24 @@ export function outputLines(run: RunResult): string[] {
 
 const BINARY_FILE = /\.(?:png|jpe?g|gif|webm|mp4|zip|zst|gz|pdf)$/i;
 
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+/** The text of a file as the command line sees it, or null for a binary one (a NUL byte, not strict UTF-8). */
+function textOf(bytes: Buffer): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return STRICT_UTF8.decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The text of every file under a directory, with the zip data inside an html report decoded. Unless
- * snapshots are included, test-results and the attachment copies in html/data are left out: when an
- * expect fails, Playwright itself writes a snapshot of the page there, with the value of every field.
+ * The text of every file under a directory, with the zip data inside an html report decoded. blw run
+ * redacts the test results, so they are covered; a file with a binary suffix or binary content is
+ * never text in the run files and is left out. The html report stays outside the promise: unless
+ * snapshots are included, the attachment copies in html/data are left out, because when an expect
+ * fails Playwright itself writes a snapshot of the page there, with the value of every field.
  */
 function directoryTexts(root: string, snapshots: boolean, dir: string = root): [string, string][] {
   const texts: [string, string][] = [];
@@ -188,11 +202,12 @@ function directoryTexts(root: string, snapshots: boolean, dir: string = root): [
     const file = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       const relative = path.relative(root, file).split(path.sep).join('/');
-      if (!snapshots && (entry.name === 'test-results' || relative.endsWith('html/data'))) continue;
+      if (!snapshots && relative.endsWith('html/data')) continue;
       texts.push(...directoryTexts(root, snapshots, file));
     } else if (!BINARY_FILE.test(entry.name)) {
       const label = path.relative(root, file);
-      const text = fs.readFileSync(file, 'utf8');
+      const text = textOf(fs.readFileSync(file));
+      if (text === null) continue;
       texts.push([label, text]);
       if (entry.name === 'index.html') {
         const inner = embeddedZipTexts(text);
@@ -207,9 +222,11 @@ function directoryTexts(root: string, snapshots: boolean, dir: string = root): [
 
 /**
  * Checks that neither the demo login nor the demo password occurs in the output of a run or, when the
- * run id is known, in the files of that run: summary.json, report.txt, both CSV files and every file
- * under the run directory, including the data packed inside the html report. The page snapshots that
- * Playwright writes for a failed expect are checked only with opts.snapshots.
+ * run id is known, in the files of that run: summary.json, report.txt, both CSV files, every text file
+ * under the run directory (the test results included, which blw run redacts) with the data packed
+ * inside the html report, and the bytes of every entry of the run zip when there is one. The page
+ * snapshots that Playwright writes for a failed expect into the html report are checked only with
+ * opts.snapshots.
  */
 export async function expectNoDemoSecrets(
   run: RunResult,
@@ -232,6 +249,15 @@ export async function expectNoDemoSecrets(
   for (const [label, text] of texts) {
     expect(text.includes(DEMO_ACCOUNT.login), `the demo login is in ${label}`).toBe(false);
     expect(text.includes(DEMO_ACCOUNT.password), `the demo password is in ${label}`).toBe(false);
+  }
+  const archive = runId === undefined ? undefined : path.join(DEMO_ARTIFACTS_DIR, `report_${runId}.zip`);
+  if (archive !== undefined && fs.existsSync(archive)) {
+    const login = Buffer.from(DEMO_ACCOUNT.login);
+    const password = Buffer.from(DEMO_ACCOUNT.password);
+    for (const [name, bytes] of unzipEntries(fs.readFileSync(archive))) {
+      expect(bytes.includes(login), `the demo login is in the zip entry ${name}`).toBe(false);
+      expect(bytes.includes(password), `the demo password is in the zip entry ${name}`).toBe(false);
+    }
   }
 }
 
@@ -273,36 +299,44 @@ function killTree(pid: number | undefined): void {
   }
 }
 
+export type StartedRun = {
+  pid: number;
+  /** Settles when the process and its output pipes are closed. */
+  result: Promise<RunResult>;
+  /** Kills the whole process tree, hard. */
+  kill: () => void;
+};
+
 /**
- * Runs node with the given arguments: hermetic environment (opts.env is merged over it), no stdin,
- * the demo project as working directory unless opts.cwd says otherwise, and the whole process tree
- * killed on timeout.
+ * Starts node with the given arguments and returns at once: hermetic environment (opts.env is merged
+ * over it), no stdin, the demo project as working directory unless opts.cwd says otherwise, and the
+ * whole process tree killed on timeout or through kill().
  */
-export function runInDemo(
+function startNode(
   args: string[],
   opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {},
-): Promise<RunResult> {
+): StartedRun {
   const timeoutMs = opts.timeoutMs ?? 90_000;
-  return new Promise<RunResult>((resolve, reject) => {
-    const started = performance.now();
-    const child = spawn(process.execPath, args, {
-      cwd: opts.cwd ?? DEMO_DIR,
-      env: { ...hermeticEnv(), ...opts.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-    });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
+  const started = performance.now();
+  const child = spawn(process.execPath, args, {
+    cwd: opts.cwd ?? DEMO_DIR,
+    env: { ...hermeticEnv(), ...opts.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  let timedOut = false;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk: string) => {
+    stderr += chunk;
+  });
+  const result = new Promise<RunResult>((resolve, reject) => {
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child.pid);
@@ -316,6 +350,24 @@ export function runInDemo(
       resolve({ status, stdout, stderr, durationMs: performance.now() - started, timedOut });
     });
   });
+  if (child.pid === undefined) {
+    // The process did not start; the error event settles result.
+    void result.catch(() => undefined);
+    throw new Error(`could not start ${process.execPath}`);
+  }
+  return { pid: child.pid, result, kill: () => killTree(child.pid) };
+}
+
+/**
+ * Runs node with the given arguments: hermetic environment (opts.env is merged over it), no stdin,
+ * the demo project as working directory unless opts.cwd says otherwise, and the whole process tree
+ * killed on timeout.
+ */
+export function runInDemo(
+  args: string[],
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {},
+): Promise<RunResult> {
+  return startNode(args, opts).result;
 }
 
 /** Runs the demo project's own Playwright CLI (a second copy, in a separate process). */
@@ -324,13 +376,22 @@ export function runDemoPlaywright(args: string[], opts: { timeoutMs?: number } =
   return runInDemo([cli, ...args], opts);
 }
 
+const BLW_CLI: string = path.join(DEMO_DIR, 'node_modules', 'baselinewatch', 'dist', 'cli.js');
+
+/** Starts `blw` as the demo project has it installed without waiting for it; kill() ends its whole tree. */
+export function startBlw(
+  args: string[],
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {},
+): StartedRun {
+  return startNode([BLW_CLI, ...args], opts);
+}
+
 /** Runs `blw` as the demo project has it installed, the way a scheduler would start it. */
 export function runBlw(
   args: string[],
   opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {},
 ): Promise<RunResult> {
-  const cli = path.join(DEMO_DIR, 'node_modules', 'baselinewatch', 'dist', 'cli.js');
-  return runInDemo([cli, ...args], opts);
+  return startBlw(args, opts).result;
 }
 
 export type JsonTest = {

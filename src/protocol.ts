@@ -15,6 +15,12 @@ export const MASK_COLOR = '#FF00FF' as const;
 /** Name of the one screenshot attachment every test ends with; the reporter looks it up by name. */
 export const SCREENSHOT_ATTACHMENT = 'screenshot' as const;
 
+/**
+ * The shortest account login or password a run hides. A shorter value is not redacted anywhere, and
+ * blw run warns about it. The redaction module re-exports this constant.
+ */
+export const MIN_REDACT_LENGTH = 3 as const;
+
 /** Time the end-of-test screenshot may take, in milliseconds. */
 export const SCREENSHOT_TIMEOUT_MS = 10_000 as const;
 
@@ -88,10 +94,29 @@ export const EXIT_CODES = { pass: 0, fail: 1, notReady: 3 } as const;
 /**
  * Codes of the warnings a summary can carry; the report translates them from structure. A
  * history_not_written warning without pass names the runs.csv row of the run, and with pass n the
- * metrics.csv rows of pass n.
+ * metrics.csv rows of pass n. lock_taken_over: a stale lock of an earlier run was taken over.
+ * retention_failed: old run items could not be deleted (count). secret_too_short: the login or the
+ * password is too short to hide (field). binary_left_out: files were left out of the zip because
+ * they could not be cleaned of the login or the password (count). zip_skipped: the zip is made on Windows only.
+ * zip_failed: the zip could not be built. No warning carries a path, a file name or a value, and none
+ * changes the exit code or the verdict.
  */
-export const WARNING_CODES = ['pass_invalid', 'pass_2_not_built', 'history_not_written'] as const;
+export const WARNING_CODES = [
+  'pass_invalid',
+  'pass_2_not_built',
+  'history_not_written',
+  'lock_taken_over',
+  'retention_failed',
+  'secret_too_short',
+  'binary_left_out',
+  'zip_skipped',
+  'zip_failed',
+] as const;
 export type WarningCode = (typeof WARNING_CODES)[number];
+
+/** The account field a warning can name. */
+export const WARNING_FIELDS = ['login', 'password'] as const;
+export type WarningField = (typeof WARNING_FIELDS)[number];
 
 /** Start of the result line a run prints for a scheduler. */
 export const RESULT_LINE_PREFIX = 'RESULT=' as const;
@@ -102,8 +127,18 @@ export const REASON_LINE_PREFIX = 'REASON=' as const;
 /** One baseline metric of one node, named in a metric gap list. */
 export type MetricRef = { scenario: string; node: string; metric: string };
 
-/** A condition worth showing next to a run result; the optional fields say where it happened. */
-export type RunWarning = { code: WarningCode; pass?: 1 | 2; scenario?: string; node?: string };
+/**
+ * A condition worth showing next to a run result; the optional fields say where it happened, which
+ * account field it concerns and how many items it counts.
+ */
+export type RunWarning = {
+  code: WarningCode;
+  pass?: 1 | 2;
+  scenario?: string;
+  node?: string;
+  field?: WarningField;
+  count?: number;
+};
 
 /** One project of a pass: its class, what it measured and the best-effort error category. */
 export type PassProject = {

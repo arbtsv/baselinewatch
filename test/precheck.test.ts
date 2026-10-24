@@ -122,6 +122,144 @@ describe('checkProjectFiles', () => {
   });
 });
 
+describe('account values in names', () => {
+  type EnvOptions = { login: string; scenarios?: Record<string, { nodes: Record<string, string> }> };
+  const envWith = ({ login, scenarios }: EnvOptions): object => ({
+    ...(validEnv() as object),
+    account: { login, password: 'placeholder-password' },
+    ...(scenarios === undefined ? {} : { scenarios }),
+  });
+  const baselinesFor = (scenario: string, metric: string) => ({ [scenario]: { [metric]: { reference_ms: 300, maxRatio: 3 } } });
+
+  function configMessage(root: string): string {
+    try {
+      checkProjectFiles(root);
+    } catch (error) {
+      assert.equal((error as { reason?: string }).reason, 'config');
+      return (error as Error).message;
+    }
+    assert.fail('checkProjectFiles is expected to throw');
+  }
+
+  test('a metric name that holds the login names the file, the scenario and the field only', () => {
+    const root = makeProject({ env: envWith({ login: 'opsuser' }), baselines: baselinesFor('demo', 'opsuser_ms') });
+    const message = configMessage(root);
+    assert.ok(message.includes('baselines.json'), message);
+    assert.ok(message.includes('"demo"'), message);
+    assert.ok(message.includes('login'), message);
+    assert.ok(!message.includes('opsuser'), message);
+  });
+
+  test('a short login rejects a whole-word metric name without repeating it', () => {
+    const root = makeProject({ env: envWith({ login: 'ops' }), baselines: baselinesFor('demo', 'ops_page_ms') });
+    const message = configMessage(root);
+    assert.ok(message.includes('baselines.json'), message);
+    assert.ok(!message.includes('ops_page_ms'), message);
+  });
+
+  test('a login of three characters rejects a metric name that only starts with it, without repeating it', () => {
+    const root = makeProject({ env: envWith({ login: 'ops' }), baselines: baselinesFor('demo', 'opsview_page_ms') });
+    const message = configMessage(root);
+    assert.ok(message.includes('baselines.json'), message);
+    assert.ok(!message.includes('opsview_page_ms'), message);
+  });
+
+  test('a login of two characters accepts a metric name that only starts with it', () => {
+    const root = makeProject({ env: envWith({ login: 'op' }), baselines: baselinesFor('demo', 'opview_page_ms') });
+    assert.deepEqual(checkProjectFiles(root).projects, ['demo--node-1']);
+  });
+
+  test('a scenario name that holds the login names env.json and the field before the scenario file check', () => {
+    const scenarios = { 'opsuser-check': { nodes: { 'node-1': 'http://127.0.0.1:4101/' } } };
+    const root = makeProject({
+      env: envWith({ login: 'opsuser', scenarios }),
+      baselines: baselinesFor('opsuser-check', 'login_ms'),
+      scenarios: ['opsuser-check.spec.ts'],
+    });
+    const message = configMessage(root);
+    assert.ok(message.includes('env.json'), message);
+    assert.ok(message.includes('login'), message);
+    assert.ok(!message.includes('opsuser'), message);
+  });
+
+  test('a scenario name that holds the login is reported even when its spec file is missing', () => {
+    const scenarios = { 'opsuser-check': { nodes: { 'node-1': 'http://127.0.0.1:4101/' } } };
+    const root = makeProject({
+      env: envWith({ login: 'opsuser', scenarios }),
+      baselines: baselinesFor('opsuser-check', 'login_ms'),
+      scenarios: [],
+    });
+    const message = configMessage(root);
+    assert.ok(message.includes('env.json'), message);
+    assert.ok(!message.includes('opsuser'), message);
+  });
+
+  test('a node name that holds the login names env.json, the scenario and the field', () => {
+    const scenarios = { demo: { nodes: { 'opsuser-east': 'http://127.0.0.1:4101/' } } };
+    const root = makeProject({ env: envWith({ login: 'opsuser', scenarios }) });
+    const message = configMessage(root);
+    assert.ok(message.includes('env.json'), message);
+    assert.ok(message.includes('"demo"'), message);
+    assert.ok(message.includes('login'), message);
+    assert.ok(!message.includes('opsuser'), message);
+  });
+
+  test('a password hit names the password field', () => {
+    const root = makeProject({
+      env: { ...(validEnv() as object), account: { login: 'placeholder-login', password: 'pwsecret9' } },
+      baselines: baselinesFor('demo', 'page_pwsecret9_ms'),
+    });
+    const message = configMessage(root);
+    assert.ok(message.includes('password'), message);
+    assert.ok(!message.includes('pwsecret9'), message);
+  });
+
+  test('runPrechecks turns the leak into a config failure before the copy and browser lookups', async () => {
+    const root = makeProject({ env: envWith({ login: 'opsuser' }), baselines: baselinesFor('demo', 'opsuser_ms') });
+    const expected = configMessage(root);
+    const calls: string[] = [];
+    const result = await runPrechecks(root, CORE_FILE, fakeDeps(calls));
+    assert.equal(result.ok, false);
+    const failure = result.ok ? undefined : result.failure;
+    assert.equal(failure?.reason, 'config');
+    assert.equal(failure?.message, expected);
+    assert.deepEqual(calls, []);
+  });
+
+  test('onEnv is called once with the parsed env for a complete project', async () => {
+    const seen: unknown[] = [];
+    const result = await runPrechecks(makeProject(), CORE_FILE, fakeDeps(), { onEnv: (env) => seen.push(env.account) });
+    assert.equal(result.ok, true);
+    assert.deepEqual(seen, [{ login: 'login-for-test', password: 'password-for-test' }]);
+  });
+
+  test('onEnv is called before baselines.json is read: a broken baselines.json is still a config failure', async () => {
+    const seen: unknown[] = [];
+    const root = makeProject({ baselines: '{ not json' });
+    const result = await runPrechecks(root, CORE_FILE, fakeDeps(), { onEnv: (env) => seen.push(env.account) });
+    assert.equal(seen.length, 1);
+    assert.equal(result.ok ? 'ok' : result.failure.reason, 'config');
+  });
+
+  test('onEnv is never called for a broken env.json', async () => {
+    let calls = 0;
+    const result = await runPrechecks(makeProject({ env: null }), CORE_FILE, fakeDeps(), { onEnv: () => void (calls += 1) });
+    assert.equal(result.ok, false);
+    assert.equal(calls, 0);
+  });
+
+  test('an exception from onEnv propagates unchanged', async () => {
+    await assert.rejects(
+      runPrechecks(makeProject(), CORE_FILE, fakeDeps(), {
+        onEnv: () => {
+          throw new RangeError('hook failed');
+        },
+      }),
+      { name: 'RangeError', message: 'hook failed' },
+    );
+  });
+});
+
 describe('runPrechecks: configuration', () => {
   const CASES: Array<[string, ProjectFiles, string]> = [
     ['a missing env.json', { env: null }, 'env.json'],

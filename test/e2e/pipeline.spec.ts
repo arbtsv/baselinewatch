@@ -221,6 +221,12 @@ function withSources<T>(sources: [string, string][], fn: () => Promise<T>): Prom
   return withScenario(first[0], first[1], () => withSources(rest, fn));
 }
 
+// The warnings of a run without the one that only says the zip was not built on this OS, so that
+// a comparison holds on every OS.
+function withoutZipWarnings(warnings: SummaryFile['warnings']): SummaryFile['warnings'] {
+  return warnings.filter((warning) => warning.code !== 'zip_skipped');
+}
+
 function exists(...parts: string[]): boolean {
   return fs.existsSync(path.join(...parts));
 }
@@ -494,6 +500,24 @@ const ROWS: Row[] = [
   },
   {
     ...NOT_READY,
+    name: 'a metric name that holds the login is a config error',
+    scenarios: UNUSED_SCENARIOS,
+    // "overview" is a substring of the demo metric overview_ms.
+    wrap: async (_context, fn) => {
+      const env = await demoEnv({}, { scenarios: { demo: { 'node-1': UNUSED_URL } } });
+      env.account.login = 'overview';
+      return withRawFile(DEMO_ENV_FILE, `${JSON.stringify(env, null, 2)}\n`, fn);
+    },
+    reason: 'config',
+    check: (context) => {
+      notReadyCheck(['baselines.json', '"demo"', 'login'], true)(context);
+      const output = `${context.run.stdout}\n${context.run.stderr}`;
+      expect(output).not.toContain('overview_ms');
+      expect(output).not.toContain('overview');
+    },
+  },
+  {
+    ...NOT_READY,
     name: 'scenario without its file',
     scenarios: { 'e2e-ghost': { 'node-1': 'unused' } },
     reason: 'config',
@@ -693,7 +717,7 @@ test.describe('unwritable history', () => {
       expect(summary.status).toBe('pass');
       expect(summary.exit_code).toBe(0);
       expect(summary.reason).toBeNull();
-      expect(summary.warnings).toEqual([{ code: 'history_not_written' }]);
+      expect(withoutZipWarnings(summary.warnings)).toEqual([{ code: 'history_not_written' }]);
       const runId = summary.run_id;
       expect(runId).toMatch(RUN_ID);
       expect(fs.readFileSync(path.join(DEMO_ARTIFACTS_DIR, 'report.txt'), 'utf8')).toContain('runs.csv');
@@ -726,7 +750,7 @@ test.describe('unwritable history', () => {
       const summary = readArtifactJson('summary.json') as unknown as SummaryFile;
       expect(summary.status).toBe('pass');
       expect(summary.reason).toBeNull();
-      expect(summary.warnings).toEqual([{ code: 'history_not_written', pass: 1 }]);
+      expect(withoutZipWarnings(summary.warnings)).toEqual([{ code: 'history_not_written', pass: 1 }]);
       const runId = summary.run_id;
       expect(runId).toMatch(RUN_ID);
       const runDir = path.join(DEMO_ARTIFACTS_DIR, 'runs', runId);

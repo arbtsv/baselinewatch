@@ -1,4 +1,5 @@
 // The English strings of the report and the console. Machine tokens stay out of this file.
+import { MIN_REDACT_LENGTH } from '../protocol.ts';
 import type { Catalog } from './catalog.ts';
 
 export const en: Catalog = {
@@ -34,6 +35,18 @@ export const en: Catalog = {
         return warning.pass === undefined
           ? 'The run history (runs.csv) could not be updated; details are in cli-error.log in the run directory.'
           : `The metric rows of pass ${warning.pass} could not be added to metrics.csv.`;
+      case 'lock_taken_over':
+        return 'A lock left by an earlier run that is no longer active was taken over.';
+      case 'retention_failed':
+        return `Old run items that could not be deleted: ${warning.count ?? '?'}; the next run tries again.`;
+      case 'secret_too_short':
+        return `The account ${warning.field ?? 'login or password'} is shorter than ${MIN_REDACT_LENGTH} characters and is not hidden in the run output.`;
+      case 'binary_left_out':
+        return `Files left out of the zip because they could not be cleaned of the account login or password: ${warning.count ?? '?'}.`;
+      case 'zip_skipped':
+        return 'The zip was not built: it is made on Windows only.';
+      case 'zip_failed':
+        return 'The zip could not be built; the run files are in the run directory.';
     }
   },
   resultLine: (result, reason) => (reason === null ? `Result: ${result}` : `Result: ${result} (${reason})`),

@@ -5,7 +5,17 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { isConfigError } from '../src/errors.ts';
-import { MANUAL_RUN, RUN_ID_PATTERN, readRunContext, runIdFrom, runLayout } from '../src/layout.ts';
+import {
+  MANUAL_RUN,
+  REPORT_ZIP_PATTERN,
+  RUN_ID_PATTERN,
+  TEMP_ZIP_PATTERN,
+  readRunContext,
+  reportZipName,
+  runIdFrom,
+  runLayout,
+  tempZipName,
+} from '../src/layout.ts';
 
 const ROOT = path.resolve(os.tmpdir(), 'blw-layout-root');
 
@@ -42,7 +52,14 @@ describe('runLayout', () => {
       runsCsv: path.join(artifacts, 'runs.csv'),
       summaryJson: path.join(artifacts, 'summary.json'),
       reportTxt: path.join(artifacts, 'report.txt'),
+      reportZip: path.join(artifacts, 'report_20261020T123456Z.zip'),
     });
+  });
+
+  test('the report zip sits at the artifacts root and is named after the run', () => {
+    const layout = runLayout(ROOT, { runId: '20261020T123456Z', pass: 1, manual: false });
+    assert.equal(layout.reportZip, path.join(ROOT, 'artifacts', reportZipName('20261020T123456Z')));
+    assert.equal(path.dirname(layout.reportZip), layout.artifactsDir);
   });
 
   test('the cumulative files sit at the artifacts root, outside every run directory', () => {
@@ -129,5 +146,38 @@ describe('runIdFrom', () => {
   test('the pattern accepts what runIdFrom returns', () => {
     assert.match(runIdFrom(new Date('2026-10-20T12:34:56.789Z')), RUN_ID_PATTERN);
     assert.match(runIdFrom(new Date('2026-01-02T03:04:05.000Z')), RUN_ID_PATTERN);
+  });
+});
+
+describe('the zip names', () => {
+  const RUN = '20261020T100000Z';
+
+  test('the report zip and the temporary zip are named after the run id', () => {
+    assert.equal(reportZipName(RUN), 'report_20261020T100000Z.zip');
+    assert.equal(tempZipName(RUN, 4242), '.report_20261020T100000Z.4242.tmp.zip');
+  });
+
+  test('the patterns match those names and capture the run id', () => {
+    assert.equal(REPORT_ZIP_PATTERN.exec(reportZipName(RUN))?.[1], RUN);
+    assert.equal(TEMP_ZIP_PATTERN.exec(tempZipName(RUN, 4242))?.[1], RUN);
+  });
+
+  test('the patterns match nothing else', () => {
+    const notReport = ['report_manual.zip', 'report_20261020T100000Z.zip.part', 'report_20261020T100000Z.zip.zip', 'xreport_20261020T100000Z.zip', 'report.zip'];
+    for (const name of notReport) {
+      assert.equal(REPORT_ZIP_PATTERN.test(name), false, name);
+    }
+    const notTemp = [
+      '.report_20261020T100000Z.tmp.zip',
+      '.report_manual.4242.tmp.zip',
+      '.report_20261020T100000Z.4242.tmp.zip.part',
+      'report_20261020T100000Z.4242.tmp.zip',
+      '.report_20261020T100000Z.abc.tmp.zip',
+    ];
+    for (const name of notTemp) {
+      assert.equal(TEMP_ZIP_PATTERN.test(name), false, name);
+    }
+    assert.equal(TEMP_ZIP_PATTERN.test(reportZipName(RUN)), false);
+    assert.equal(REPORT_ZIP_PATTERN.test(tempZipName(RUN, 4242)), false);
   });
 });

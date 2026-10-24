@@ -1,4 +1,5 @@
-// The checks that stop a run before Playwright starts, in this order: the project files (config),
+// The checks that stop a run before Playwright starts, in this order: the project files (config,
+// including the rule that no scenario, node or metric name holds the account login or password),
 // exactly one copy of @playwright/test (playwright_copies) and an installed headless browser
 // (browser). Each failure becomes exit code 3 in the command line. Playwright is never imported
 // here: the browser lookup reaches the project's own copy through createRequire at run time, and
@@ -9,6 +10,7 @@ import path from 'node:path';
 import { loadBaselines, type Baselines } from './baselines.ts';
 import { loadEnv, type Locale, type MonitorEnv } from './env.ts';
 import { ConfigError, isConfigError } from './errors.ts';
+import { checkAccountNames } from './names.ts';
 import { checkScenarioFiles } from './scenarios.ts';
 
 export type PrelaunchFailure = { reason: 'config' | 'playwright_copies' | 'browser'; message: string; locale?: Locale };
@@ -40,11 +42,24 @@ const COPIES_MESSAGE =
 const BROWSER_MESSAGE =
   'The headless Chromium browser that Playwright uses is not installed. Install it with: npx playwright install chromium';
 
+/** Hooks of the project file checks. */
+export type PrecheckHooks = {
+  /** Called once with the parsed env.json, right after it loaded and before baselines.json is read. */
+  onEnv?: (env: MonitorEnv) => void;
+};
+
 /** Reads and checks the project files under root. Any problem is a ConfigError that names the file. */
-export function checkProjectFiles(root: string): PrecheckOk {
+export function checkProjectFiles(root: string, hooks?: PrecheckHooks): PrecheckOk {
   const base = path.resolve(root);
-  const env = loadEnv(path.join(base, ENV_FILE));
-  const baselines = loadBaselines(path.join(base, BASELINES_FILE));
+  const envFile = path.join(base, ENV_FILE);
+  const baselinesFile = path.join(base, BASELINES_FILE);
+  const env = loadEnv(envFile);
+  // The command line attaches the redactor here, before any other project file can put a message on
+  // the console.
+  hooks?.onEnv?.(env);
+  const baselines = loadBaselines(baselinesFile);
+  // The scenario file message names the scenario, so the account check comes first.
+  checkAccountNames({ env, baselines, envFile, baselinesFile });
   checkScenarioFiles(base, Object.keys(env.scenarios));
   const configFile = path.join(base, CONFIG_FILE);
   if (!fs.existsSync(configFile)) {
@@ -189,16 +204,18 @@ function readableLocale(root: string): Locale | undefined {
 
 /**
  * Runs the three checks in order and stops at the first failure. A failure after env.json loaded
- * carries its locale. Arguments are checked before this, by parseRunArgs.
+ * carries its locale. Arguments are checked before this, by parseRunArgs. The hooks go to
+ * checkProjectFiles; an exception that onEnv throws is not a ConfigError and propagates unchanged.
  */
 export async function runPrechecks(
   root: string,
   coreFile: string,
   deps?: Partial<PrecheckDeps>,
+  hooks?: PrecheckHooks,
 ): Promise<{ ok: true; value: PrecheckOk } | { ok: false; failure: PrelaunchFailure }> {
   let value: PrecheckOk;
   try {
-    value = checkProjectFiles(root);
+    value = checkProjectFiles(root, hooks);
   } catch (error) {
     if (!isConfigError(error)) {
       throw error;

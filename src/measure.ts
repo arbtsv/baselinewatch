@@ -2,8 +2,8 @@
 // the messages, with the step, the clock and the annotation injected. It imports nothing from
 // Playwright, so the whole contract runs in plain unit tests.
 import { ConfigError } from './errors.ts';
-import { nameProblem } from './names.ts';
-import { SLOW_PREFIX, type MetricRecord } from './protocol.ts';
+import { leakedField, nameProblem } from './names.ts';
+import { MIN_REDACT_LENGTH, SLOW_PREFIX, type MetricRecord } from './protocol.ts';
 import { judge, type BaselineEntry } from './verdict.ts';
 
 /** Runs fn inside a step named after the metric, times it and judges it against the baseline. */
@@ -39,12 +39,26 @@ export function finishMessage(slow: readonly string[]): string | undefined {
   return `${SLOW_PREFIX} ${slow.join('; ')}`;
 }
 
+const HOLDS_ACCOUNT_MESSAGE = 'measure: the metric name contains the account login or password; choose another name';
+
+// True when the name holds, in any case, a login or password of MIN_REDACT_LENGTH or more characters
+// as a plain substring. leakedField already rejects such a name when it follows the metric rule; this
+// is for a name that breaks that rule (a hyphen, a capital letter), which is not printed either: the
+// console redactor hides the value, but this is the second line for a bare playwright test.
+function holdsAccountValue(account: MeasureDeps['account'], name: string): boolean {
+  const lowered = name.toLowerCase();
+  return [account.login, account.password].some(
+    (value) => value.length >= MIN_REDACT_LENGTH && lowered.includes(value.toLowerCase()),
+  );
+}
+
 /**
  * One session per test. measure(name, fn) checks, in this order and before fn runs: the name is a
- * string; it does not contain the account login or password (compared without case, and the error
+ * string; it does not hold the account login or password under the rule of leakedField (the error
  * does not repeat the name); it follows the metric rule; it was not measured before in this session;
- * the scenario has a baseline for it. Then it runs fn in a step titled with the name and records the
- * timing, the annotation and, for a slow step, the message.
+ * the scenario has a baseline for it. A name that holds a login or password of MIN_REDACT_LENGTH or
+ * more characters as a substring is never repeated in the error. Then it runs fn in a step titled with
+ * the name and records the timing, the annotation and, for a slow step, the message.
  */
 export function createMeasure(deps: MeasureDeps): MeasureSession {
   const { scenario, baselines, baselinesFile, account, step, now, annotate } = deps;
@@ -56,15 +70,13 @@ export function createMeasure(deps: MeasureDeps): MeasureSession {
     if (typeof name !== 'string') {
       throw new TypeError('measure: the metric name must be a string');
     }
-    const lowered = name.toLowerCase();
-    for (const secret of [account.login, account.password]) {
-      if (secret !== '' && lowered.includes(secret.toLowerCase())) {
-        throw new Error('measure: the metric name contains the account login or password; choose another name');
-      }
+    if (leakedField(account, name) !== undefined) {
+      throw new Error(HOLDS_ACCOUNT_MESSAGE);
     }
+    const quiet = holdsAccountValue(account, name);
     const problem = nameProblem('metric', name);
     if (problem !== undefined) {
-      throw new Error(`measure: metric name "${name}" ${problem}`);
+      throw new Error(quiet ? HOLDS_ACCOUNT_MESSAGE : `measure: metric name "${name}" ${problem}`);
     }
     if (used.has(name)) {
       throw new Error(`measure: metric "${name}" is measured twice in one test; use distinct names`);
