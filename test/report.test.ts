@@ -163,7 +163,7 @@ describe('English report', () => {
         'Warnings\n' +
           '  A lock left by an earlier run that is no longer active was taken over.\n' +
           '  The account password is shorter than 3 characters and is not hidden in the run output.\n' +
-          '  Binary files left out of the zip because they contain the account login or password: 2.\n' +
+          '  Files left out of the zip because they could not be cleaned of the account login or password: 2.\n' +
           '  The zip was not built: it is made on Windows only.\n',
       ),
       text,

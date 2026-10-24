@@ -1,7 +1,8 @@
 // Exact-literal redaction of the account login and password: one redactor for text (the console and
 // the text files of a run) and one walk over the run directory. Only the exact characters of a value
 // are replaced; escaped forms (JSON, URL, HTML entities) and values shorter than MIN_REDACT_LENGTH
-// are not handled. node:fs and node:path only; no Playwright module is loaded here.
+// are not handled. A file that is not UTF-8 text is only searched, for the UTF-8 and UTF-16 bytes of a
+// value, and counted as tainted when one is found. node:fs and node:path only; no Playwright module is loaded here.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Account } from './env.ts';
@@ -24,9 +25,9 @@ export type Redactor = {
   tooShort: WarningField[];
   /** The input with every value replaced by MASK, longest value first. */
   text(input: string): string;
-  /** True when the buffer holds the UTF-8 bytes of a value. */
+  /** True when the buffer holds a value as UTF-8, UTF-16LE or UTF-16BE bytes. */
   containsValue(data: Buffer): boolean;
-  /** The byte length of the longest value that is redacted; 0 when none is. */
+  /** The byte length of the longest needle (a value in any of the three encodings); 0 when no value is redacted. */
   longestValueBytes: number;
 };
 
@@ -42,7 +43,11 @@ export function createRedactor(account: Account): Redactor {
   const values = [...new Set(entries.map(({ value }) => value).filter((value) => value.length >= MIN_REDACT_LENGTH))].sort(
     (a, b) => b.length - a.length,
   );
-  const needles = values.map((value) => Buffer.from(value, 'utf8'));
+  // A UTF-16 text file (a PowerShell redirect writes one) has NUL bytes, so it is searched as bytes.
+  const needles = values.flatMap((value) => {
+    const little = Buffer.from(value, 'utf16le');
+    return [Buffer.from(value, 'utf8'), little, Buffer.from(little).swap16()];
+  });
   return {
     tooShort,
     text: (input) => values.reduce((text, value) => text.split(value).join(MASK), input),
@@ -67,14 +72,22 @@ export function strictText(data: Buffer): string | undefined {
   }
 }
 
-/** What a walk did: how many files it rewrote and which ones (relative, with '/') still hold a value. */
-export type WalkResult = { rewritten: number; tainted: string[] };
+/**
+ * What a walk did, with relative paths written with '/': how many files it rewrote, the files that
+ * still hold a value or could not be read (tainted), the directories that could not be listed
+ * (unlisted: nothing under them is known), and every file that was read and is free of a value (clean).
+ */
+export type WalkResult = { rewritten: number; tainted: string[]; unlisted: string[]; clean: string[] };
 
 export type WalkOptions = {
   /** Files above this size are scanned in chunks instead of decoded. */
   maxTextBytes?: number;
   /** The read size of a chunked scan. */
   chunkBytes?: number;
+  /** Replaces the directory listing; for tests. */
+  readdir?: (dir: string) => fs.Dirent[];
+  /** Replaces the rename that puts a rewritten file in place; for tests. */
+  rename?: (from: string, to: string) => void;
 };
 
 // What the command line parses or produces itself, or what stays outside the promise: the pass files,
@@ -88,15 +101,19 @@ function pause(ms: number): void {
 }
 
 // Temp file and rename, three tries: a virus scan can hold the target for a moment on Windows.
-function rewrite(file: string, text: string): boolean {
+function rewrite(file: string, text: string, rename: (from: string, to: string) => void): boolean {
   const temp = `${file}.${process.pid}.redact`;
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
     try {
       fs.writeFileSync(temp, text, 'utf8');
-      fs.renameSync(temp, file);
+      rename(temp, file);
       return true;
     } catch {
-      fs.rmSync(temp, { force: true });
+      try {
+        fs.rmSync(temp, { force: true });
+      } catch {
+        // A temp file that is held too: the next attempt overwrites it.
+      }
       if (attempt + 1 < REWRITE_TRIES) {
         pause(REWRITE_PAUSE_MS);
       }
@@ -133,7 +150,13 @@ function chunkedHit(file: string, redactor: Redactor, chunkBytes: number): boole
 }
 
 // One regular file: true when it is rewritten, false when nothing changed; undefined when it is tainted.
-function redactFile(file: string, redactor: Redactor, maxTextBytes: number, chunkBytes: number): boolean | undefined {
+function redactFile(
+  file: string,
+  redactor: Redactor,
+  maxTextBytes: number,
+  chunkBytes: number,
+  rename: (from: string, to: string) => void,
+): boolean | undefined {
   try {
     if (fs.statSync(file).size > maxTextBytes) {
       return chunkedHit(file, redactor, chunkBytes) ? undefined : false;
@@ -147,7 +170,7 @@ function redactFile(file: string, redactor: Redactor, maxTextBytes: number, chun
     if (redacted === text) {
       return false;
     }
-    return rewrite(file, redacted) ? true : undefined;
+    return rewrite(file, redacted, rename) ? true : undefined;
   } catch {
     // A file that cannot be read cannot be shown to be free of a value.
     return undefined;
@@ -155,19 +178,25 @@ function redactFile(file: string, redactor: Redactor, maxTextBytes: number, chun
 }
 
 /**
- * Redacts the text files under runDir in place and reports the files that still hold a value or could
- * not be read (tainted, relative paths with '/'). Only real directories and files are visited: a
- * symbolic link or junction is neither followed nor read. The walk never throws.
+ * Redacts the text files under runDir in place and reports what it saw: the files that still hold a
+ * value or could not be read, the directories it could not list, and the files that are free of a value.
+ * Whatever is in neither clean nor tainted was not verified, so a caller that packs files takes the
+ * clean list as its only source. Only real directories and files are visited: a symbolic link or
+ * junction is neither followed nor read. The walk never throws.
  */
 export function redactRunDirectory(runDir: string, redactor: Redactor, options: WalkOptions = {}): WalkResult {
   const maxTextBytes = options.maxTextBytes ?? MAX_TEXT_BYTES;
   const chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
-  const result: WalkResult = { rewritten: 0, tainted: [] };
+  const readdir = options.readdir ?? ((dir: string) => fs.readdirSync(dir, { withFileTypes: true }));
+  const rename = options.rename ?? ((from: string, to: string) => fs.renameSync(from, to));
+  const result: WalkResult = { rewritten: 0, tainted: [], unlisted: [], clean: [] };
   const visit = (dir: string, prefix: string): void => {
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = readdir(dir);
     } catch {
+      // A directory that cannot be listed cannot be shown to be free of a value either.
+      result.unlisted.push(prefix === '' ? '.' : prefix);
       return;
     }
     for (const entry of entries) {
@@ -179,11 +208,14 @@ export function redactRunDirectory(runDir: string, redactor: Redactor, options: 
       if (entry.isDirectory()) {
         visit(file, relative);
       } else if (entry.isFile()) {
-        const outcome = redactFile(file, redactor, maxTextBytes, chunkBytes);
+        const outcome = redactFile(file, redactor, maxTextBytes, chunkBytes, rename);
         if (outcome === undefined) {
           result.tainted.push(relative);
-        } else if (outcome) {
-          result.rewritten += 1;
+        } else {
+          result.clean.push(relative);
+          if (outcome) {
+            result.rewritten += 1;
+          }
         }
       }
     }

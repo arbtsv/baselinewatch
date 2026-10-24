@@ -914,6 +914,9 @@ describe('a taken over lock and the interrupt paths', () => {
 describe('retention', () => {
   const OLD = '20261018T100000Z';
   const RECENT = '20261020T090000Z';
+  // Two more recent runs: the newest runs are kept whatever their age, so an old run goes only when
+  // enough newer ones are there (the current run and the two before it).
+  const RECENT_TOO = ['20261020T080000Z', '20261020T070000Z'];
   const cleanPass = (options: PassRunOptions): PassRun => {
     writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
     return CLEAN_EXIT;
@@ -935,7 +938,14 @@ describe('retention', () => {
       return target;
     };
     const old = [runDir(OLD), file(`report_${OLD}.zip`), file(`.report_${OLD}.77.tmp.zip`)];
-    const kept = [runDir(RECENT), file(`report_${RECENT}.zip`), runDir('manual'), file('metrics.csv'), file('cli-error.log')];
+    const kept = [
+      runDir(RECENT),
+      file(`report_${RECENT}.zip`),
+      ...RECENT_TOO.map(runDir),
+      runDir('manual'),
+      file('metrics.csv'),
+      file('cli-error.log'),
+    ];
     fs.writeFileSync(path.join(dir, 'runs.csv'), 'run_id,result\nearlier-run,PASS\n');
     return { old, kept };
   }
@@ -1008,6 +1018,9 @@ describe('retention while a process holds a run directory', { skip: process.plat
       },
       prechecks: checked('en', 1),
     });
+    for (const recent of ['20261020T090000Z', '20261020T080000Z']) {
+      fs.mkdirSync(path.join(artifacts(h.root), 'runs', recent), { recursive: true });
+    }
     const held = path.join(artifacts(h.root), 'runs', '20261018T100000Z', 'pass-1');
     fs.mkdirSync(held, { recursive: true });
     fs.writeFileSync(path.join(held, 'trace.txt'), 'trace');
@@ -1342,6 +1355,36 @@ describe('the zip', () => {
     assert.deepEqual(copy.warnings, summary.warnings);
     const sentence = catalogFor('en').warning({ code: 'binary_left_out', count: 1 });
     assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'report.txt'), 'utf8').includes(sentence));
+  });
+
+  test('a UTF-16 text file that holds the password stays out of the zip, stays on disk and is counted', async () => {
+    const text = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`password=${ACCOUNT.password}\r\n`, 'utf16le')]);
+    const h = harness({
+      runPass: (options) =>
+        leaveClean(options, (resultsDir) => {
+          fs.writeFileSync(path.join(resultsDir, 't', 'notes.txt'), text);
+        }),
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.ok(readSummary(h.root).warnings.some((warning) => warning.code === 'binary_left_out' && warning.count === 1));
+    const names = (h.zipCalls[0] as { args: string[] }).args.slice(7);
+    assert.ok(!names.some((name) => name.includes('notes.txt')), names.join('\n'));
+    assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'pass-1', 'test-results', 't', 'notes.txt')).equals(text));
+  });
+
+  test('off Windows no file is reported as left out of a zip that is never built', async () => {
+    const h = harness({
+      platform: 'linux',
+      runPass: (options) =>
+        leaveClean(options, (resultsDir) => {
+          fs.writeFileSync(path.join(resultsDir, 't', 'blob.bin'), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(ACCOUNT.login), Buffer.from([0])]));
+        }),
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    const codes = readSummary(h.root).warnings.map((warning) => warning.code);
+    assert.ok(codes.includes('zip_skipped'), codes.join());
+    assert.ok(!codes.includes('binary_left_out'), codes.join());
+    assert.equal(h.zipCalls.length, 0);
   });
 
   test('a stderr log in a single-byte code page that holds the login is not counted and stays on disk', async () => {

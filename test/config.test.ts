@@ -274,8 +274,12 @@ describe('buildMonitorConfig: account values in names', () => {
     assert.ok(!error.message.includes('beta'), error.message);
   });
 
-  test('a short login accepts a metric name that only starts with it', () => {
-    const built = buildMonitorConfig(withLogin('ops', { alpha: { opsview_page_ms: ENTRY } }));
+  test('a login of three characters rejects a metric name that only starts with it', () => {
+    assertConfigError(() => buildMonitorConfig(withLogin('ops', { alpha: { opsview_page_ms: ENTRY } })), /contains the account login/);
+  });
+
+  test('a login of two characters accepts a metric name that only starts with it', () => {
+    const built = buildMonitorConfig(withLogin('op', { alpha: { opview_page_ms: ENTRY } }));
     assert.deepEqual(
       (built.projects ?? []).map((project) => project.name),
       ['alpha--node-1', 'alpha--node-2', 'beta--node-1', 'beta--node-2'],

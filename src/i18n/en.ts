@@ -42,7 +42,7 @@ export const en: Catalog = {
       case 'secret_too_short':
         return `The account ${warning.field ?? 'login or password'} is shorter than ${MIN_REDACT_LENGTH} characters and is not hidden in the run output.`;
       case 'binary_left_out':
-        return `Binary files left out of the zip because they contain the account login or password: ${warning.count ?? '?'}.`;
+        return `Files left out of the zip because they could not be cleaned of the account login or password: ${warning.count ?? '?'}.`;
       case 'zip_skipped':
         return 'The zip was not built: it is made on Windows only.';
       case 'zip_failed':

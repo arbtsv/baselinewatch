@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyRetention, parseRunId, retentionCutoff } from '../src/retention.ts';
+import { applyRetention, KEEP_NEWEST_RUNS, parseRunId, retentionCutoff } from '../src/retention.ts';
 
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-retention-'));
 after(() => {
@@ -90,7 +90,7 @@ describe('applyRetention', () => {
     ];
     fs.mkdirSync(path.join(dir, 'report_20261001T000000Z.zip'));
     kept.push(path.join(dir, 'report_20261001T000000Z.zip'));
-    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: CURRENT });
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT });
     assert.deepEqual(result, { removed: 3, failed: 0 });
     for (const gone of [old, oldZip, oldTemp]) {
       assert.equal(exists(gone), false, gone);
@@ -105,7 +105,7 @@ describe('applyRetention', () => {
     const atCutoff = makeRunDir(dir, '20261019T100000Z');
     const older = makeRunDir(dir, '20261019T095959Z');
     const zipAtCutoff = makeFile(dir, 'report_20261019T100000Z.zip');
-    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: CURRENT });
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT });
     assert.deepEqual(result, { removed: 1, failed: 0 });
     assert.equal(exists(atCutoff), true);
     assert.equal(exists(zipAtCutoff), true);
@@ -117,7 +117,7 @@ describe('applyRetention', () => {
     const protectedRun = makeRunDir(dir, '20261001T000000Z');
     const protectedZip = makeFile(dir, 'report_20261001T000000Z.zip');
     const other = makeRunDir(dir, '20261002T000000Z');
-    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: '20261001T000000Z' });
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: '20261001T000000Z' });
     assert.deepEqual(result, { removed: 1, failed: 0 });
     assert.equal(exists(protectedRun), true);
     assert.equal(exists(protectedZip), true);
@@ -127,7 +127,7 @@ describe('applyRetention', () => {
   test('a run id from the future is not old', () => {
     const dir = freshArtifacts();
     const future = makeRunDir(dir, '20271020T100000Z');
-    assert.deepEqual(applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: CURRENT }), { removed: 0, failed: 0 });
+    assert.deepEqual(applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT }), { removed: 0, failed: 0 });
     assert.equal(exists(future), true);
   });
 
@@ -137,6 +137,7 @@ describe('applyRetention', () => {
     const oldZip = makeFile(dir, 'report_20200101T000000Z.zip');
     const calls: string[] = [];
     const result = applyRetention({
+      keepNewest: 1,
       artifactsDir: dir,
       startedAt: STARTED,
       days: 0,
@@ -155,10 +156,10 @@ describe('applyRetention', () => {
     const noRuns = path.join(WORK, 'only-zips');
     fs.mkdirSync(noRuns, { recursive: true });
     const oldZip = makeFile(noRuns, 'report_20200101T000000Z.zip');
-    assert.deepEqual(applyRetention({ artifactsDir: noRuns, startedAt: STARTED, days: 1, keep: CURRENT }), { removed: 1, failed: 0 });
+    assert.deepEqual(applyRetention({ artifactsDir: noRuns, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT }), { removed: 1, failed: 0 });
     assert.equal(exists(oldZip), false);
     const nothing = path.join(WORK, 'does-not-exist');
-    assert.deepEqual(applyRetention({ artifactsDir: nothing, startedAt: STARTED, days: 1, keep: CURRENT }), { removed: 0, failed: 0 });
+    assert.deepEqual(applyRetention({ artifactsDir: nothing, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT }), { removed: 0, failed: 0 });
     assert.equal(exists(nothing), false);
   });
 
@@ -169,6 +170,7 @@ describe('applyRetention', () => {
     const goneZip = makeFile(dir, 'report_20261003T000000Z.zip');
     const tried: string[] = [];
     const result = applyRetention({
+      keepNewest: 1,
       artifactsDir: dir,
       startedAt: STARTED,
       days: 1,
@@ -196,9 +198,23 @@ describe('applyRetention', () => {
     fs.writeFileSync(precious, 'keep me');
     const link = path.join(dir, 'runs', '20261001T000000Z');
     fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
-    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: CURRENT });
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT });
     assert.deepEqual(result, { removed: 0, failed: 0 });
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(precious, 'utf8'), 'keep me');
+  });
+
+  test('a junction inside an old run directory is not followed when the run directory goes', () => {
+    const dir = freshArtifacts();
+    const outside = path.join(WORK, `outside-nested-${counter}`);
+    fs.mkdirSync(outside, { recursive: true });
+    const precious = path.join(outside, 'precious.txt');
+    fs.writeFileSync(precious, 'keep me');
+    const old = makeRunDir(dir, '20261001T000000Z');
+    fs.symlinkSync(outside, path.join(old, 'pass-1', 'test-results', 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT });
+    assert.deepEqual(result, { removed: 1, failed: 0 });
+    assert.equal(exists(old), false);
     assert.equal(fs.readFileSync(precious, 'utf8'), 'keep me');
   });
 
@@ -210,9 +226,72 @@ describe('applyRetention', () => {
     const justNow = new Date();
     fs.utimesSync(recentName, longAgo, longAgo);
     fs.utimesSync(oldName, justNow, justNow);
-    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keep: CURRENT });
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 1, keepNewest: 1, keep: CURRENT });
     assert.deepEqual(result, { removed: 1, failed: 0 });
     assert.equal(exists(recentName), true);
     assert.equal(exists(oldName), false);
+  });
+});
+
+describe('the newest runs are never removed', () => {
+  const oldIds = ['20240101T000000Z', '20240102T000000Z', '20240103T000000Z', '20240104T000000Z', '20240105T000000Z'];
+
+  test('by default the current run and the two newest before it stay, however old they are', () => {
+    assert.equal(KEEP_NEWEST_RUNS, 3);
+    const dir = freshArtifacts();
+    const runs = oldIds.map((id) => makeRunDir(dir, id));
+    const zips = oldIds.map((id) => makeFile(dir, `report_${id}.zip`));
+    const current = makeRunDir(dir, CURRENT);
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 30, keep: CURRENT });
+    assert.deepEqual(result, { removed: 6, failed: 0 });
+    for (const index of [0, 1, 2]) {
+      assert.equal(exists(runs[index] as string), false, oldIds[index]);
+      assert.equal(exists(zips[index] as string), false, oldIds[index]);
+    }
+    for (const index of [3, 4]) {
+      assert.equal(exists(runs[index] as string), true, oldIds[index]);
+      assert.equal(exists(zips[index] as string), true, oldIds[index]);
+    }
+    assert.equal(exists(current), true);
+  });
+
+  test('a clock that jumped two years forward leaves the latest runs and the history', () => {
+    const dir = freshArtifacts();
+    const runs = oldIds.map((id) => makeRunDir(dir, id));
+    const history = makeFile(dir, 'runs.csv');
+    const jumped = new Date('2028-10-20T10:00:00.000Z');
+    const result = applyRetention({ artifactsDir: dir, startedAt: jumped, days: 30, keep: '20281020T100000Z' });
+    assert.deepEqual(result, { removed: 3, failed: 0 });
+    assert.equal(exists(runs[4] as string), true);
+    assert.equal(exists(runs[3] as string), true);
+    assert.equal(exists(runs[0] as string), false);
+    assert.equal(exists(history), true);
+  });
+
+  test('a run that left only a zip counts as a run, and a run with a directory and a zip counts once', () => {
+    const dir = freshArtifacts();
+    const zipOnly = makeFile(dir, 'report_20240105T000000Z.zip');
+    const both = makeRunDir(dir, '20240104T000000Z');
+    const bothZip = makeFile(dir, 'report_20240104T000000Z.zip');
+    const third = makeRunDir(dir, '20240103T000000Z');
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 30, keep: CURRENT });
+    assert.deepEqual(result, { removed: 1, failed: 0 });
+    for (const stays of [zipOnly, both, bothZip]) {
+      assert.equal(exists(stays), true, stays);
+    }
+    assert.equal(exists(third), false);
+  });
+
+  test('names that are not run ids do not take a place among the newest', () => {
+    const dir = freshArtifacts();
+    makeRunDir(dir, 'manual');
+    makeRunDir(dir, '20261340T250000Z');
+    const old = makeRunDir(dir, '20240101T000000Z');
+    const result = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 30, keepNewest: 2, keep: CURRENT });
+    assert.deepEqual(result, { removed: 0, failed: 0 });
+    assert.equal(exists(old), true);
+    const none = applyRetention({ artifactsDir: dir, startedAt: STARTED, days: 30, keepNewest: 1, keep: CURRENT });
+    assert.deepEqual(none, { removed: 1, failed: 0 });
+    assert.equal(exists(old), false);
   });
 });

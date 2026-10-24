@@ -202,29 +202,46 @@ function recordRun(run: RunInfo, summary: Summary): Summary {
   return recorded;
 }
 
-// The last look at the run directory before anything is packed: the text files are redacted once more,
-// and the files that still hold a value (binary, in another encoding, or too stubborn to rewrite) are
-// returned so the zip leaves them out. Only the ones that would have entered the zip are counted in the
-// warning, never by path or name. Off Windows the zip is skipped, and that is said now, so the copies of
-// the report already carry it. A run that did not measure has nothing to scan and builds no zip.
-function scanBeforeZip(run: RunInfo, deps: RunDeps): ReadonlySet<string> {
+/** What the last look at the run directory found: what the zip must leave out, and what it may take. */
+type Sealed = {
+  /** Files that still hold a value or could not be read, and directories that could not be listed. */
+  tainted: ReadonlySet<string>;
+  /** The files that were read and are free of a value; undefined when there was no redactor to check with. */
+  verified: ReadonlySet<string> | undefined;
+};
+
+// A directory that could not be listed counts as one file left out when the zip would have held
+// something from it.
+const ZIP_DIRECTORY = /^pass-\d+(?:\/test-results(?:\/|$)|$)/;
+
+// The last look at the run directory before anything is packed. It changes the run: the text files are
+// redacted once more, and the warnings of the run are added to run.warnings, which the summary then
+// carries, so it has to run before the summary is built. The files that still hold a value (binary, in
+// another encoding, or too stubborn to rewrite) and the directories that could not be listed are
+// returned, with the files that were verified, so the zip leaves out everything else. The warning counts
+// only what the zip would have held, never by path or name, and only where a zip is built. Off Windows
+// the zip is skipped, and that is said now, so the copies of the report already carry it. A run that did
+// not measure has nothing to scan and builds no zip.
+function sealRunDirectory(run: RunInfo, deps: RunDeps): Sealed {
   if (!run.measured) {
-    return new Set();
+    return { tainted: new Set(), verified: undefined };
   }
-  const tainted = run.redactor === undefined ? [] : redactRunDirectory(run.layout.runDir, run.redactor).tainted;
-  const leftOut = tainted.filter(isZipCandidate).length;
-  if (leftOut > 0) {
-    run.warnings.push({ code: 'binary_left_out', count: leftOut });
-  }
-  if (deps.platform !== 'win32') {
+  const walk = run.redactor === undefined ? undefined : redactRunDirectory(run.layout.runDir, run.redactor);
+  const tainted = [...(walk?.tainted ?? []), ...(walk?.unlisted ?? [])];
+  if (deps.platform === 'win32') {
+    const leftOut = (walk?.tainted ?? []).filter(isZipCandidate).length + (walk?.unlisted ?? []).filter((dir) => ZIP_DIRECTORY.test(dir)).length;
+    if (leftOut > 0) {
+      run.warnings.push({ code: 'binary_left_out', count: leftOut });
+    }
+  } else {
     run.warnings.push({ code: 'zip_skipped' });
   }
-  return new Set(tainted);
+  return { tainted: new Set(tainted), verified: walk === undefined ? undefined : new Set(walk.clean) };
 }
 
 // Builds report_<run id>.zip from the redacted run directory. A zip that fails adds a warning and
 // rewrites the report files and their copies, never the runs.csv row; the exit code is the summary's own.
-async function packRun(run: RunInfo, summary: Summary, tainted: ReadonlySet<string>, deps: RunDeps): Promise<Summary> {
+async function packRun(run: RunInfo, summary: Summary, sealed: Sealed, deps: RunDeps): Promise<Summary> {
   if (!run.measured || deps.platform !== 'win32') {
     return summary;
   }
@@ -232,7 +249,7 @@ async function packRun(run: RunInfo, summary: Summary, tainted: ReadonlySet<stri
     runDir: run.layout.runDir,
     tempZip: path.join(run.layout.artifactsDir, tempZipName(run.runId, deps.pid)),
     finalZip: run.layout.reportZip,
-    files: zipFileList(run.layout.runDir, tainted),
+    files: zipFileList(run.layout.runDir, sealed.tainted, sealed.verified),
     run: deps.zip,
     tar: tarPath(),
   });
@@ -252,8 +269,8 @@ async function packRun(run: RunInfo, summary: Summary, tainted: ReadonlySet<stri
 async function finishRun(run: RunInfo, end: Finish, deps: RunDeps): Promise<0 | 1 | 3> {
   const { decision } = end;
   const catalog = catalogFor(run.locale);
-  const tainted = scanBeforeZip(run, deps);
-  const summary = await packRun(run, recordRun(run, summaryOf(run, decision, deps)), tainted, deps);
+  const sealed = sealRunDirectory(run, deps);
+  const summary = await packRun(run, recordRun(run, summaryOf(run, decision, deps)), sealed, deps);
   const lines =
     decision.status === 'not_ready' && decision.reason !== null
       ? notReadyLines(decision.reason as NotReadyReason, end.message, catalog)

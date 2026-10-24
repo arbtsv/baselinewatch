@@ -25,6 +25,7 @@ import {
   withScenario,
   type RunResult,
 } from '../helpers/demo.ts';
+import { STALE_AFTER_MS } from '../../src/lock.ts';
 import { startPortal } from '../helpers/portal.ts';
 
 const LOCK_FILE = path.join(DEMO_ARTIFACTS_DIR, '.lock');
@@ -134,10 +135,10 @@ test.describe('the run lock', () => {
     }
   });
 
-  test('a lock older than 3 hours is taken over even when its pid is alive', async () => {
+  test('a lock older than the stale age is taken over even when its pid is alive', async () => {
     const { run, summary } = await runWithLock({
       pid: process.pid,
-      started_at: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+      started_at: new Date(Date.now() - 2 * STALE_AFTER_MS).toISOString(),
       run_id: null,
     });
     expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);

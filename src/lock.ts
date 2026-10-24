@@ -5,8 +5,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const LOCK_FILE = '.lock';
-/** A lock whose start is this old is stale even when its pid is alive (pid reuse is bounded by it). */
-export const STALE_AFTER_MS = 3 * 60 * 60 * 1000;
+/**
+ * A lock whose start is this old is stale even when its pid is alive: a hard kill leaves the lock with
+ * a dead pid, and Windows reuses pids, so another process may carry that pid and look like the holder.
+ * This bounds how long that can blind the monitor. The longest run is about 35 minutes (two passes of
+ * at most 15 minutes, their watchdog grace and the zip), so an hour leaves room.
+ */
+export const STALE_AFTER_MS = 60 * 60 * 1000;
 /** A lock file that cannot be parsed is a half-written one for this long, then it is stale. */
 export const PARTIAL_GRACE_MS = 10_000;
 
@@ -21,6 +26,8 @@ export type LockDeps = {
   link?: (existing: string, newPath: string) => void;
   /** Test seam between a stale verdict and the rename that takes the file aside. */
   afterJudge?: () => void;
+  /** Test seam: reads the file that was taken aside; defaults to fs.readFileSync. */
+  readAside?: (file: string) => string;
 };
 
 export type LockResult =
@@ -40,10 +47,21 @@ export function processIsAlive(pid: number): boolean {
   }
 }
 
+// What blw writes: toISOString(). Date.parse alone also takes free text, so the start is matched
+// strictly: it is printed to the console when a run finds the lock held.
+const STARTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+
 function parse(text: string): LockContent | undefined {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
-    if (typeof value.pid !== 'number' || typeof value.started_at !== 'string' || !Number.isFinite(Date.parse(value.started_at))) {
+    if (
+      typeof value.pid !== 'number' ||
+      !Number.isSafeInteger(value.pid) ||
+      value.pid <= 0 ||
+      typeof value.started_at !== 'string' ||
+      !STARTED_AT.test(value.started_at) ||
+      !Number.isFinite(Date.parse(value.started_at))
+    ) {
       return undefined;
     }
     return { pid: value.pid, started_at: value.started_at, run_id: typeof value.run_id === 'string' ? value.run_id : null };
@@ -118,13 +136,24 @@ function judge(lockFile: string, deps: LockDeps): Verdict {
 }
 
 // Puts a file that was taken aside by mistake back under the lock name. Somebody else may hold the
-// lock again by now, and then the file stays aside and is deleted: that holder wins.
-function giveBack(aside: string, lockFile: string, text: string): void {
+// lock again by now, and then the file stays aside and is deleted: that holder wins. The text is known
+// when the file could be read; without it a file system with no hard links gets the file back by a
+// rename, unless the name is taken in the meantime.
+function giveBack(aside: string, lockFile: string, text: string | undefined, deps: LockDeps): void {
   try {
-    fs.linkSync(aside, lockFile);
+    (deps.link ?? fs.linkSync)(aside, lockFile);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      return;
+    }
+    if (text !== undefined) {
       createExclusively(lockFile, text);
+    } else if (!fs.existsSync(lockFile)) {
+      try {
+        fs.renameSync(aside, lockFile);
+      } catch {
+        // The file stays aside; the next run judges whatever the lock name holds.
+      }
     }
   }
 }
@@ -157,14 +186,13 @@ export function acquireLock(artifactsDir: string, deps: LockDeps): LockResult {
       }
       let moved: string | undefined;
       try {
-        moved = fs.readFileSync(aside, 'utf8');
+        moved = (deps.readAside ?? ((file: string) => fs.readFileSync(file, 'utf8')))(aside);
       } catch {
         moved = undefined;
       }
+      // A file that cannot be read is not shown to be the stale one, so it goes back like a different one.
       if (moved !== verdict.text) {
-        if (moved !== undefined) {
-          giveBack(aside, lockFile, moved);
-        }
+        giveBack(aside, lockFile, moved, deps);
         fs.rmSync(aside, { force: true });
         continue;
       }

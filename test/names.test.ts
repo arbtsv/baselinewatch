@@ -3,6 +3,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_NAME_LENGTH, METRIC_PATTERN, NAME_PATTERN, WHOLE_WORD_BELOW, leakedField, nameProblem } from '../src/names.ts';
+import { MIN_REDACT_LENGTH } from '../src/protocol.ts';
 
 describe('scenario and node names', () => {
   const valid = ['a', 'demo', 'node-1', 'my_portal', 'a1-b2_c3', 'a'.repeat(64)];
@@ -65,10 +66,23 @@ describe('metric names', () => {
 describe('account values in names', () => {
   const account = (login: string, password = 'placeholder-password') => ({ login, password });
 
-  test('a short login is a leak only as a whole word', () => {
+  test('a value of three characters is a leak wherever it sits in the name', () => {
     assert.equal(leakedField(account('ops'), 'ops_page_ms'), 'login');
     assert.equal(leakedField(account('ops'), 'page_ops'), 'login');
-    assert.equal(leakedField(account('ops'), 'opsview_page_ms'), undefined);
+    assert.equal(leakedField(account('ops'), 'opsview_page_ms'), 'login');
+    assert.equal(leakedField(account('ops'), 'my_loopsy_ms'), 'login');
+    assert.equal(leakedField(account('ops'), 'page_ms'), undefined);
+  });
+
+  test('a value shorter than the redaction minimum is a leak only as a whole word', () => {
+    assert.equal(leakedField(account('ab'), 'ab_page_ms'), 'login');
+    assert.equal(leakedField(account('ab'), 'page_ab'), 'login');
+    assert.equal(leakedField(account('ab'), 'abview_page_ms'), undefined);
+    assert.equal(leakedField(account('ab'), 'label_ms'), undefined);
+  });
+
+  test('the password is checked the same way', () => {
+    assert.equal(leakedField(account('some-login', 'pw9'), 'xpw9y_ms'), 'password');
   });
 
   test('a one-word name equal to a short login is a leak', () => {
@@ -80,15 +94,16 @@ describe('account values in names', () => {
     assert.equal(leakedField(account('Operator1'), 'MY_OPERATOR1_MS'), 'login');
   });
 
-  test('a value with an underscore matches as a whole word sequence', () => {
+  test('a value with an underscore is found inside a name too', () => {
     assert.equal(leakedField(account('a_b'), 'x_a_b_y'), 'login');
-    assert.equal(leakedField(account('a_b'), 'x_a_by'), undefined);
+    assert.equal(leakedField(account('a_b'), 'x_a_by'), 'login');
+    assert.equal(leakedField(account('a_b'), 'x_ab_y'), undefined);
   });
 
-  test('a value of six or more characters is a leak as a substring', () => {
-    assert.equal(WHOLE_WORD_BELOW, 6);
-    assert.equal(leakedField(account('abcdef'), 'xabcdefx_ms'), 'login');
-    assert.equal(leakedField(account('abcde'), 'xabcdex_ms'), undefined);
+  test('the substring rule starts at the redaction minimum', () => {
+    assert.equal(WHOLE_WORD_BELOW, MIN_REDACT_LENGTH);
+    assert.equal(leakedField(account('abc'), 'xabcx_ms'), 'login');
+    assert.equal(leakedField(account('ab'), 'xabx_ms'), undefined);
   });
 
   test('a value with a character outside the metric alphabet is skipped', () => {

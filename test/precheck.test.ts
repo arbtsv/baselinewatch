@@ -157,8 +157,15 @@ describe('account values in names', () => {
     assert.ok(!message.includes('ops_page_ms'), message);
   });
 
-  test('a short login accepts a metric name that only starts with it', () => {
+  test('a login of three characters rejects a metric name that only starts with it, without repeating it', () => {
     const root = makeProject({ env: envWith({ login: 'ops' }), baselines: baselinesFor('demo', 'opsview_page_ms') });
+    const message = configMessage(root);
+    assert.ok(message.includes('baselines.json'), message);
+    assert.ok(!message.includes('opsview_page_ms'), message);
+  });
+
+  test('a login of two characters accepts a metric name that only starts with it', () => {
+    const root = makeProject({ env: envWith({ login: 'op' }), baselines: baselinesFor('demo', 'opview_page_ms') });
     assert.deepEqual(checkProjectFiles(root).projects, ['demo--node-1']);
   });
 

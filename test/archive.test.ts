@@ -88,6 +88,23 @@ describe('tarArgs', () => {
     ]);
   });
 
+  test('with a list file the names are read from it and no double dash is used', () => {
+    assert.deepEqual(tarArgs('C:\\a\\.report_x.1.tmp.zip', 'C:\\r', [], 'C:\\t\\files.txt'), [
+      '-a',
+      '-c',
+      '-f',
+      'C:\\a\\.report_x.1.tmp.zip',
+      '-C',
+      'C:\\r',
+      '-T',
+      'C:\\t\\files.txt',
+    ]);
+  });
+
+  test('refuses an archive name that does not end in .zip with a list file as well', () => {
+    assert.throws(() => tarArgs('C:\\a\\report.zip.part', 'C:\\r', [], 'C:\\t\\files.txt'), /\.zip/);
+  });
+
   test('refuses an archive name that does not end in .zip', () => {
     assert.throws(() => tarArgs('C:\\a\\report.zip.part', 'C:\\r', ['report.txt']), /\.zip/);
   });
@@ -384,6 +401,40 @@ describe('zipFileList', () => {
     const list = zipFileList(runDir, new Set(['pass-1/test-results/t/attachments/screenshot-1.png']));
     assert.ok(!list.includes('pass-1/test-results/t/attachments/screenshot-1.png'));
     assert.ok(list.includes('pass-1/test-results/t/error-context.md'));
+  });
+
+  test('leaves out everything under a tainted directory, and everything when the run directory is tainted', () => {
+    const runDir = makeRun();
+    const list = zipFileList(runDir, new Set(['pass-1/test-results/t']));
+    assert.ok(!list.some((name) => name.startsWith('pass-1/test-results/t/')), list.join('\n'));
+    assert.ok(list.includes('pass-1/test-results/.last-run.json'));
+    assert.ok(list.includes('report.txt'));
+    assert.deepEqual(zipFileList(runDir, new Set(['.'])), []);
+  });
+
+  test('takes a file under test-results only when it is verified', () => {
+    const runDir = makeRun();
+    const verified = new Set(['pass-1/test-results/t/error-context.md', 'pass-1/test-results/.last-run.json']);
+    assert.deepEqual(zipFileList(runDir, new Set(), verified), [
+      'report.txt',
+      'summary.json',
+      'pass-1.json',
+      'pass-1/test-results/.last-run.json',
+      'pass-1/test-results/t/error-context.md',
+    ]);
+  });
+
+  test('a file that appeared after the walk and a file in an unlisted directory stay out', () => {
+    const runDir = makeRun();
+    const verified = new Set(['pass-1/test-results/t/error-context.md']);
+    put(runDir, 'pass-1/test-results/late/new.txt');
+    const list = zipFileList(runDir, new Set(['pass-1/test-results/t/attachments']), verified);
+    assert.deepEqual(list.filter((name) => name.startsWith('pass-1/test-results/')), ['pass-1/test-results/t/error-context.md']);
+  });
+
+  test('an empty verified set takes no test result and the fixed entries still go in', () => {
+    const runDir = makeRun();
+    assert.deepEqual(zipFileList(runDir, new Set(), new Set()), ['report.txt', 'summary.json', 'pass-1.json']);
   });
 
   test('omits the report and the pass files that do not exist', () => {

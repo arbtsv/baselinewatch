@@ -10,6 +10,7 @@
 import type { Baselines } from './baselines.ts';
 import type { MonitorEnv } from './env.ts';
 import { ConfigError } from './errors.ts';
+import { MIN_REDACT_LENGTH } from './protocol.ts';
 
 export const NAME_PATTERN = /^[a-z0-9]+(?:[_-][a-z0-9]+)*$/;
 export const METRIC_PATTERN = /^[a-z][a-z0-9_]*$/;
@@ -33,8 +34,13 @@ export function nameProblem(kind: 'scenario' | 'node' | 'metric', name: string):
   return undefined;
 }
 
-/** A value of this many characters or more is a leak as a substring; a shorter one only as a whole word. */
-export const WHOLE_WORD_BELOW = 6;
+/**
+ * A value of this many characters or more is a leak as a substring, wherever it sits in a name: it is
+ * the length from which a value is redacted at all, and a name is written to files that are not
+ * redacted. A shorter value cannot be redacted either, so it is a leak only as a whole word, which
+ * keeps a login of one or two letters from rejecting every name that holds the letter.
+ */
+export const WHOLE_WORD_BELOW = MIN_REDACT_LENGTH;
 
 const METRIC_ALPHABET = /^[a-z0-9_]+$/;
 const NAME_ALPHABET = /^[a-z0-9_-]+$/;
@@ -43,8 +49,9 @@ const NAME_ALPHABET = /^[a-z0-9_-]+$/;
  * Which account field a name holds, or undefined. The name and the value are compared without case.
  * A value with a character outside the alphabet of the name kind (a-z, 0-9, _ and, for scenario and
  * node names, -) can never be part of such a name and is skipped. A value of WHOLE_WORD_BELOW or
- * more characters is a leak when it occurs anywhere in the name; a shorter one is a leak only as a
- * whole word, so login "ops" rejects "ops_page_ms" and "page_ops" and accepts "opsview_page_ms".
+ * more characters is a leak when it occurs anywhere in the name, so login "ops" rejects "ops_page_ms",
+ * "page_ops" and "opsview_page_ms"; a shorter one is a leak only as a whole word, so login "ab"
+ * rejects "ab_page_ms" and accepts "abview_page_ms".
  * Words are separated by _ (and by - in scenario and node names). The login is checked first. The
  * value itself is never returned, logged or thrown, and a name can always be renamed to pass.
  */

@@ -6,6 +6,14 @@ import path from 'node:path';
 import { REPORT_ZIP_PATTERN, RUN_ID_PATTERN, runIdFrom, TEMP_ZIP_PATTERN } from './layout.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The newest runs, the current one among them, that are never removed whatever their age. Retention
+ * trusts the clock: a clock that jumps forward (a resumed virtual machine, a bad time sync) by more than
+ * retention_days would make every earlier run old at once, and the evidence of the latest failures
+ * would go with them.
+ */
+export const KEEP_NEWEST_RUNS = 3;
 const RUN_ID_PARTS = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 
 /**
@@ -43,15 +51,18 @@ function listEntries(dir: string): fs.Dirent[] {
 /**
  * Removes artifacts/runs/<run id> directories, report_<run id>.zip files and temporary
  * .report_<run id>.<pid>.tmp.zip files of artifacts whose run id is strictly older than the cutoff and
- * is not `keep`. Only a real directory or a regular file qualifies: a link or junction is never
- * followed and never removed. Each removal is tried once; one that fails is counted and the rest go
- * on. 0 days (or anything that is not a positive number) removes nothing.
+ * is not `keep`, and not among the KEEP_NEWEST_RUNS newest runs (`keep` counts as the newest). Only a
+ * real directory or a regular file qualifies: a link or junction is never followed and never removed.
+ * Each removal is tried once; one that fails is counted and the rest go on. 0 days (or anything that
+ * is not a positive number) removes nothing.
  */
 export function applyRetention(options: {
   artifactsDir: string;
   startedAt: Date;
   days: number;
   keep: string;
+  /** How many of the newest runs are kept whatever their age, `keep` among them; KEEP_NEWEST_RUNS by default. */
+  keepNewest?: number;
   remove?: (target: string) => void;
 }): { removed: number; failed: number } {
   const result = { removed: 0, failed: 0 };
@@ -60,24 +71,33 @@ export function applyRetention(options: {
   }
   const cutoff = retentionCutoff(options.startedAt, options.days).getTime();
   const remove = options.remove ?? removeRecursively;
+  const runsDir = path.join(options.artifactsDir, 'runs');
+  const runDirs = listEntries(runsDir).filter((entry) => entry.isDirectory());
+  const zips = listEntries(options.artifactsDir)
+    .filter((entry) => entry.isFile())
+    .flatMap((entry) => {
+      const runId = (REPORT_ZIP_PATTERN.exec(entry.name) ?? TEMP_ZIP_PATTERN.exec(entry.name))?.[1];
+      return runId === undefined ? [] : [{ name: entry.name, runId }];
+    });
+  // The newest runs, by the moment their ids spell, whether they left a directory, a zip or both.
+  const newest = [...new Set([...runDirs.map((entry) => entry.name), ...zips.map((zip) => zip.runId)])]
+    .filter((runId) => runId !== options.keep && parseRunId(runId) !== undefined)
+    .sort((a, b) => (parseRunId(b) as Date).getTime() - (parseRunId(a) as Date).getTime())
+    .slice(0, Math.max(0, (options.keepNewest ?? KEEP_NEWEST_RUNS) - 1));
+  const protectedIds = new Set([options.keep, ...newest]);
   const isOld = (runId: string | undefined): boolean => {
     const moment = runId === undefined ? undefined : parseRunId(runId);
-    return runId !== options.keep && moment !== undefined && moment.getTime() < cutoff;
+    return runId !== undefined && !protectedIds.has(runId) && moment !== undefined && moment.getTime() < cutoff;
   };
   const doomed: string[] = [];
-  const runsDir = path.join(options.artifactsDir, 'runs');
-  for (const entry of listEntries(runsDir)) {
-    if (entry.isDirectory() && isOld(entry.name)) {
+  for (const entry of runDirs) {
+    if (isOld(entry.name)) {
       doomed.push(path.join(runsDir, entry.name));
     }
   }
-  for (const entry of listEntries(options.artifactsDir)) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    const runId = (REPORT_ZIP_PATTERN.exec(entry.name) ?? TEMP_ZIP_PATTERN.exec(entry.name))?.[1];
-    if (isOld(runId)) {
-      doomed.push(path.join(options.artifactsDir, entry.name));
+  for (const zip of zips) {
+    if (isOld(zip.runId)) {
+      doomed.push(path.join(options.artifactsDir, zip.name));
     }
   }
   for (const target of doomed) {

@@ -42,8 +42,9 @@ export function finishMessage(slow: readonly string[]): string | undefined {
 const HOLDS_ACCOUNT_MESSAGE = 'measure: the metric name contains the account login or password; choose another name';
 
 // True when the name holds, in any case, a login or password of MIN_REDACT_LENGTH or more characters
-// as a plain substring. Such a name is never printed: the console redactor hides the value, but this
-// is the second line for a bare playwright test.
+// as a plain substring. leakedField already rejects such a name when it follows the metric rule; this
+// is for a name that breaks that rule (a hyphen, a capital letter), which is not printed either: the
+// console redactor hides the value, but this is the second line for a bare playwright test.
 function holdsAccountValue(account: MeasureDeps['account'], name: string): boolean {
   const lowered = name.toLowerCase();
   return [account.login, account.password].some(
@@ -56,9 +57,8 @@ function holdsAccountValue(account: MeasureDeps['account'], name: string): boole
  * string; it does not hold the account login or password under the rule of leakedField (the error
  * does not repeat the name); it follows the metric rule; it was not measured before in this session;
  * the scenario has a baseline for it. A name that holds a login or password of MIN_REDACT_LENGTH or
- * more characters as a substring is never repeated in any of these errors, even when the rule
- * accepts it and it is measured. Then it runs fn in a step titled with the name and records the
- * timing, the annotation and, for a slow step, the message.
+ * more characters as a substring is never repeated in the error. Then it runs fn in a step titled with
+ * the name and records the timing, the annotation and, for a slow step, the message.
  */
 export function createMeasure(deps: MeasureDeps): MeasureSession {
   const { scenario, baselines, baselinesFile, account, step, now, annotate } = deps;
@@ -79,21 +79,15 @@ export function createMeasure(deps: MeasureDeps): MeasureSession {
       throw new Error(quiet ? HOLDS_ACCOUNT_MESSAGE : `measure: metric name "${name}" ${problem}`);
     }
     if (used.has(name)) {
-      throw new Error(quiet ? HOLDS_ACCOUNT_MESSAGE : `measure: metric "${name}" is measured twice in one test; use distinct names`);
+      throw new Error(`measure: metric "${name}" is measured twice in one test; use distinct names`);
     }
     used.add(name);
     if (!Object.hasOwn(baselines, name)) {
-      throw quiet
-        ? new ConfigError(
-            baselinesFile,
-            `no baseline for a metric of scenario "${scenario}" whose name holds an account value`,
-            'Rename that metric or add a baseline for it to baselines.json',
-          )
-        : new ConfigError(
-            baselinesFile,
-            `no baseline for metric "${name}" in scenario "${scenario}"`,
-            `Add "${scenario}" -> "${name}" with reference_ms and maxRatio to baselines.json`,
-          );
+      throw new ConfigError(
+        baselinesFile,
+        `no baseline for metric "${name}" in scenario "${scenario}"`,
+        `Add "${scenario}" -> "${name}" with reference_ms and maxRatio to baselines.json`,
+      );
     }
     const entry = baselines[name] as BaselineEntry;
     return step(name, async () => {

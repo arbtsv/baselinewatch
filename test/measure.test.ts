@@ -291,12 +291,21 @@ describe('measure: names that hold an account value', () => {
     assert.deepEqual(h.titles, []);
   });
 
-  test('a short login still measures a name that only starts with it', async () => {
-    const h = harness([0, 10], { account: { login: 'ops', password: 'pw_secret_9' }, baselines: WITH_OPS });
-    await h.session.measure('opsview_page_ms', h.fn(null));
-    assert.deepEqual(h.titles, ['opsview_page_ms']);
+  test('a login of three characters rejects a name that only starts with it, before fn runs', async () => {
+    const h = harness([], { account: { login: 'ops', password: 'pw_secret_9' }, baselines: WITH_OPS });
+    const error = await rejection(h.session.measure('opsview_page_ms', h.fn(null)));
+    assert.ok(error.message.includes('login or password'), error.message);
+    assert.ok(!error.message.includes('opsview_page_ms'), error.message);
+    assert.equal(h.calls(), 0);
+    assert.deepEqual(h.titles, []);
+  });
+
+  test('a login of two characters still measures a name that only starts with it', async () => {
+    const baselines = { ...BASELINES, opview_page_ms: ENTRY };
+    const h = harness([0, 10], { account: { login: 'op', password: 'pw_secret_9' }, baselines });
+    await h.session.measure('opview_page_ms', h.fn(null));
+    assert.deepEqual(h.titles, ['opview_page_ms']);
     assert.equal(h.annotated.length, 1);
-    assert.equal(h.annotated[0]?.name, 'opsview_page_ms');
   });
 
   test('a name that fails the metric rule and holds a login with a hyphen is rejected without the name', async () => {
@@ -305,33 +314,6 @@ describe('measure: names that hold an account value', () => {
       const error = await rejection(h.session.measure(name, h.fn(null)));
       assert.ok(!error.message.toLowerCase().includes('demo-operator'), error.message);
     }
-    assert.equal(h.calls(), 0);
-  });
-
-  test('a name the whole-word rule accepts is measured even though it holds a value', async () => {
-    const baselines = { ...BASELINES, opsxview_check_ms: ENTRY };
-    const h = harness([0, 10], { account: { login: 'opsx', password: 'pw_secret_9' }, baselines });
-    await h.session.measure('opsxview_check_ms', h.fn(null));
-    assert.equal(h.annotated.length, 1);
-  });
-
-  test('the measured-twice error leaves out a name that holds a value', async () => {
-    const baselines = { ...BASELINES, opsxview_check_ms: ENTRY };
-    const h = harness([0, 10], { account: { login: 'opsx', password: 'pw_secret_9' }, baselines });
-    await h.session.measure('opsxview_check_ms', h.fn(null));
-    const error = await rejection(h.session.measure('opsxview_check_ms', h.fn(null)));
-    assert.ok(!error.message.toLowerCase().includes('opsxview_check_ms'), error.message);
-    assert.ok(!error.message.toLowerCase().includes('opsx'), error.message);
-    assert.equal(h.calls(), 1, 'only the first fn ran');
-  });
-
-  test('the no-baseline error leaves out a name that holds a value but still names the file and the scenario', async () => {
-    const h = harness([], { account: { login: 'opsx', password: 'pw_secret_9' } });
-    const error = await rejection(h.session.measure('opsxview_other_ms', h.fn(null)));
-    assert.ok(error instanceof ConfigError, `expected a ConfigError, got ${error.name}`);
-    assert.ok(error.message.includes('baselines.json'), error.message);
-    assert.ok(error.message.includes('scenario "demo"'), error.message);
-    assert.ok(!error.message.toLowerCase().includes('opsx'), error.message);
     assert.equal(h.calls(), 0);
   });
 

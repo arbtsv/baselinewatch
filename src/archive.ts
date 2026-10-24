@@ -24,15 +24,19 @@ export function tarPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * The arguments for `tar -a -c -f <zip> -C <runDir> -- <files...>`. The output name must end in .zip,
- * because -a picks the archive format from the extension and writes a plain tar for any other name.
- * The double dash makes a file name that starts with a dash a file.
+ * The arguments for `tar -a -c -f <zip> -C <runDir> -- <files...>`, or, with a list file, for
+ * `tar -a -c -f <zip> -C <runDir> -T <list>` (the names are then in the list and files is not used).
+ * The output name must end in .zip, because -a picks the archive format from the extension and writes
+ * a plain tar for any other name. The double dash makes a file name that starts with a dash a file; a
+ * list file has no such guard, so its names must not start with a dash (every name of a run starts with
+ * "pass-", "report" or "summary").
  */
-export function tarArgs(zipFile: string, runDir: string, files: readonly string[]): string[] {
+export function tarArgs(zipFile: string, runDir: string, files: readonly string[], listFile?: string): string[] {
   if (!zipFile.toLowerCase().endsWith('.zip')) {
     throw new Error('the archive name must end in .zip');
   }
-  return ['-a', '-c', '-f', zipFile, '-C', runDir, '--', ...files];
+  const head = ['-a', '-c', '-f', zipFile, '-C', runDir];
+  return listFile === undefined ? [...head, '--', ...files] : [...head, '-T', listFile];
 }
 
 /** The length of the command line of an argument list: every argument and a space, plus quotes when it has a space. */
@@ -170,7 +174,7 @@ function callArguments(
   made.listDir = fs.mkdtempSync(path.join(options.listDir ?? os.tmpdir(), LIST_DIR_PREFIX));
   const listFile = path.join(made.listDir, LIST_FILE);
   fs.writeFileSync(listFile, names.files.join('\n'), 'utf8');
-  return ['-a', '-c', '-f', options.tempZip, '-C', names.root, '-T', listFile];
+  return tarArgs(options.tempZip, names.root, [], listFile);
 }
 
 function startsWithSignature(file: string): boolean {
@@ -263,17 +267,30 @@ function filesUnder(dir: string, base: string, found: string[]): void {
   }
 }
 
+// True when the path, or a directory above it, is in the set; '.' stands for the whole run directory.
+function underAny(relative: string, blocked: ReadonlySet<string>): boolean {
+  if (blocked.has('.')) {
+    return true;
+  }
+  const segments = relative.split('/');
+  return segments.some((_, index) => blocked.has(segments.slice(0, index + 1).join('/')));
+}
+
 /**
  * The files of the zip, as paths relative to runDir with '/': the report, the summary and the pass
- * files that exist, then every file under pass-1 and pass-2 test-results, sorted, without the paths in
- * tainted. It never throws; a directory that cannot be read contributes nothing.
+ * files that exist, then every file under pass-1 and pass-2 test-results, sorted. Nothing in tainted
+ * goes in, nor anything under a directory in tainted. When verified is given, a file under test-results
+ * goes in only if it is in verified (the files a redaction walk read and found free of a value), so a
+ * file that appeared after the walk, or sat in a directory the walk could not list, stays out. It never
+ * throws; a directory that cannot be read contributes nothing.
  */
-export function zipFileList(runDir: string, tainted: ReadonlySet<string>): string[] {
+export function zipFileList(runDir: string, tainted: ReadonlySet<string>, verified?: ReadonlySet<string>): string[] {
   const fixed = FIXED_ENTRIES.filter((name) => isRegularFile(path.join(runDir, name)));
   const results: string[] = [];
   for (const pass of [1, 2]) {
     filesUnder(path.join(runDir, `pass-${pass}`, 'test-results'), runDir, results);
   }
   results.sort();
-  return [...fixed, ...results].filter((name) => !tainted.has(name));
+  const checked = verified === undefined ? results : results.filter((name) => verified.has(name));
+  return [...fixed, ...checked].filter((name) => !underAny(name, tainted));
 }

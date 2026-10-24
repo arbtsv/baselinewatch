@@ -96,8 +96,8 @@ export const EXIT_CODES = { pass: 0, fail: 1, notReady: 3 } as const;
  * history_not_written warning without pass names the runs.csv row of the run, and with pass n the
  * metrics.csv rows of pass n. lock_taken_over: a stale lock of an earlier run was taken over.
  * retention_failed: old run items could not be deleted (count). secret_too_short: the login or the
- * password is too short to hide (field). binary_left_out: binary files were left out of the zip
- * because they hold the login or the password (count). zip_skipped: the zip is made on Windows only.
+ * password is too short to hide (field). binary_left_out: files were left out of the zip because
+ * they could not be cleaned of the login or the password (count). zip_skipped: the zip is made on Windows only.
  * zip_failed: the zip could not be built. No warning carries a path, a file name or a value, and none
  * changes the exit code or the verdict.
  */

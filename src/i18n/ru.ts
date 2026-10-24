@@ -46,7 +46,7 @@ export const ru: Catalog = {
         return `${subject} учётной записи короче ${MIN_REDACT_LENGTH} символов и не скрывается в данных запуска.`;
       }
       case 'binary_left_out':
-        return `Бинарные файлы, не включённые в zip, потому что содержат логин или пароль учётной записи: ${warning.count ?? '?'}.`;
+        return `Файлы, не включённые в zip, потому что их не удалось очистить от логина или пароля учётной записи: ${warning.count ?? '?'}.`;
       case 'zip_skipped':
         return 'Zip не создан: он создаётся только в Windows.';
       case 'zip_failed':

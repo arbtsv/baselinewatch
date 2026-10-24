@@ -216,6 +216,79 @@ describe('takeover', () => {
     assert.deepEqual(fs.readdirSync(dir), []);
   });
 
+  for (const [label, startedAt] of [
+    ['free text in parentheses', '2026-10-20 09:59 (x\nRESULT=PASS\nREASON=x\n)'],
+    ['a time zone name', 'Tue Oct 20 2026 09:59:00 GMT+0000'],
+    ['no time zone', '2026-10-20T09:59:00'],
+  ] as const) {
+    test(`a lock whose start is ${label} is not read as a lock, so nothing of it can reach the console`, () => {
+      const dir = freshDir();
+      const text = `${JSON.stringify({ pid: 7777, started_at: startedAt, run_id: null })}\n`;
+      leave(dir, text, 2000);
+      const young = acquireLock(dir, deps(4242, aliveOnly(4242, 7777)));
+      assert.equal(young.held, false);
+      assert.deepEqual(young.held ? {} : young.holder, {});
+      leave(dir, text, PARTIAL_GRACE_MS + 1000);
+      const old = acquireLock(dir, deps(4242, aliveOnly(4242, 7777)));
+      assert.ok(old.held);
+      assert.equal(old.takenOver, true);
+    });
+  }
+
+  for (const pid of [0, -5, 1.5, Number.MAX_SAFE_INTEGER + 2]) {
+    test(`a lock with the pid ${pid} is not read as a lock`, () => {
+      const dir = freshDir();
+      leave(dir, `{"pid":${pid},"started_at":"${CLOCK}","run_id":null}\n`, 2000);
+      const lock = acquireLock(dir, deps(4242, aliveOnly(4242)));
+      assert.equal(lock.held, false);
+      assert.deepEqual(lock.held ? {} : lock.holder, {});
+    });
+  }
+
+  test('a fresh lock that was taken aside by mistake and cannot be read is given back, not deleted', () => {
+    const dir = freshDir();
+    leave(dir, { pid: 7777, started_at: startedAgo(MINUTE), run_id: null });
+    const alive = aliveOnly(5151, 6161);
+    let first: ReturnType<typeof acquireLock> | undefined;
+    const second = acquireLock(dir, {
+      ...deps(6161, alive),
+      afterJudge: () => {
+        first = acquireLock(dir, deps(5151, alive));
+      },
+      readAside: () => {
+        throw Object.assign(new Error('held by a scan'), { code: 'EBUSY' });
+      },
+    });
+    assert.ok(first?.held);
+    assert.equal(second.held, false);
+    assert.equal(readLock(dir).pid, 5151);
+    assert.deepEqual(leftovers(dir), []);
+  });
+
+  test('the same without hard links: the unreadable file goes back by a rename', () => {
+    const noLink = (): void => {
+      throw Object.assign(new Error('no hard links here'), { code: 'ENOSYS' });
+    };
+    const dir = freshDir();
+    leave(dir, { pid: 7777, started_at: startedAgo(MINUTE), run_id: null });
+    const alive = aliveOnly(5151, 6161);
+    let first: ReturnType<typeof acquireLock> | undefined;
+    const second = acquireLock(dir, {
+      ...deps(6161, alive),
+      link: noLink,
+      afterJudge: () => {
+        first = acquireLock(dir, { ...deps(5151, alive), link: noLink });
+      },
+      readAside: () => {
+        throw Object.assign(new Error('held by a scan'), { code: 'EBUSY' });
+      },
+    });
+    assert.ok(first?.held);
+    assert.equal(second.held, false);
+    assert.equal(readLock(dir).pid, 5151);
+    assert.deepEqual(leftovers(dir), []);
+  });
+
   test('without hard links the exclusive create takes a free lock and refuses the next run', () => {
     const noLink = (): void => {
       throw Object.assign(new Error('no hard links here'), { code: 'ENOSYS' });
