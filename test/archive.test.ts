@@ -3,6 +3,7 @@
 // Run: node --test test/archive.test.ts
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -327,6 +328,24 @@ describe('isZipCandidate', () => {
   });
 });
 
+// Temporary: what the real tar.exe says when the zip is not built, and the code pages of the machine.
+function tarDiagnostics(dir: string, runDir: string, files: string[]): string {
+  const probe = path.join(dir, 'probe.zip');
+  const tar = spawnSync(tarPath(), tarArgs(probe, runDir, files), { windowsHide: true });
+  const version = spawnSync(tarPath(), ['--version'], { encoding: 'utf8', windowsHide: true });
+  const pages = spawnSync('reg', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage', '/v', 'ACP', '/v', 'OEMCP'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return [
+    `tar status=${tar.status} error=${tar.error?.message ?? '-'} zip written=${fs.existsSync(probe)}`,
+    `tar stderr (latin1)=${tar.stderr?.toString('latin1').trim()}`,
+    `tar stderr (hex)=${tar.stderr?.subarray(0, 200).toString('hex')}`,
+    `tar version=${version.stdout?.trim()}`,
+    `code pages=${pages.stdout?.replace(/\s+/g, ' ').trim()}`,
+  ].join('\n');
+}
+
 // The real tar.exe of Windows (bsdtar): the format, the order of the entries and the failure of a missing input.
 describe('the real tar.exe', { skip: process.platform !== 'win32' }, () => {
   const CYRILLIC = '\u043f\u0440\u0438\u0432\u0435\u0442';
@@ -340,7 +359,8 @@ describe('the real tar.exe', { skip: process.platform !== 'win32' }, () => {
     const files = ['report.txt', 'pass-1/test-results/a.txt', `pass-1/test-results/${CYRILLIC}/b.txt`];
     const tempZip = path.join(dir, '.report_x.1.tmp.zip');
     const finalZip = path.join(dir, 'report_x.zip');
-    assert.equal(await buildZip({ runDir, tempZip, finalZip, files, run: runTar, tar: tarPath() }), 'built');
+    const built = await buildZip({ runDir, tempZip, finalZip, files, run: runTar, tar: tarPath() });
+    assert.equal(built, 'built', built === 'built' ? undefined : tarDiagnostics(dir, runDir, files));
     const entries = unzipTexts(fs.readFileSync(finalZip));
     assert.deepEqual(
       entries.map(([, text]) => text),
