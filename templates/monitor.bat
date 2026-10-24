@@ -1,4 +1,5 @@
 @echo off
+rem blw-template: 1
 rem monitor.bat - one baselinewatch run. Exit code: 0 pass, 1 fail, 3 not ready.
 setlocal
 chcp 65001 >nul

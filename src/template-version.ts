@@ -12,6 +12,6 @@ export const LAUNCHER_MARKER = /^rem[ \t]+blw-template:[ \t]*(\d{1,6})[ \t]*$/im
 
 /** The template version a launcher text declares, or undefined when it declares none. */
 export function readLauncherMarker(text: string): number | undefined {
-  void text;
-  return undefined;
+  const match = LAUNCHER_MARKER.exec(text);
+  return match?.[1] === undefined ? undefined : Number(match[1]);
 }
