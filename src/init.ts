@@ -2,16 +2,21 @@
 // which template becomes which file and who owns it afterwards; dotfiles are stored without the dot
 // because npm pack drops them. Files are copied byte for byte, read and written as buffers, so the
 // launcher keeps its CRLF line ends; the only text that changes is the version token in package.json.
-// This module uses node:fs and node:path only: nothing from Playwright and nothing from the run module.
-// Everything it needs from outside comes in through InitDeps.
+// This module uses node:fs, node:path and the atomic writer of the pass-file module: nothing from
+// Playwright and nothing from the run module. Everything else it needs comes in through InitDeps.
 //
 // Init never overwrites or deletes what it did not create. Every target is checked first and a single
 // conflict stops the command before the first write; every file is then created exclusively, so a
 // file that appeared after the check is never overwritten either. A failed write removes exactly the
 // files and the empty directories this run created. A process that is killed in the middle can still
 // leave part of a project; the next init reports those files as conflicts and writes nothing.
+//
+// `blw init --refresh` is the other half: in an existing project it rewrites only the files that the
+// template owns (the launcher and .gitignore) from the templates of the running core. It prints what it
+// will replace, create or leave before it writes anything, asks nothing and never touches any other file.
 import fs from 'node:fs';
 import path from 'node:path';
+import { writeFileAtomic } from './pass-file.ts';
 
 export type TemplateFile = {
   /** Path under templates/, with forward slashes. */
@@ -57,6 +62,12 @@ export type InitDeps = {
    * its own behind; it must fail when the path exists. The default creates the file exclusively.
    */
   writeFile?: (file: string, bytes: Uint8Array) => void;
+  /**
+   * Replaces or creates one template-owned file during a refresh. It must leave the file either with its
+   * old bytes or with all the new ones. The default writes a temporary file in the same directory and
+   * renames it over the target.
+   */
+  replaceFile?: (file: string, bytes: Uint8Array) => void;
 };
 
 /** The folder of the templates inside the package. */
@@ -145,8 +156,87 @@ function findConflicts(dir: string, targets: readonly string[]): string[] {
   return [...conflicts];
 }
 
+// What a refresh does with one template-owned file.
+type RefreshAction = 'create' | 'replace' | 'up to date';
+
+// The files that make a directory a monitoring project, in the order they are reported.
+const PROJECT_MARKERS: readonly string[] = ['package.json', 'playwright.config.ts'];
+
+// A refresh writes the template-owned files of an existing project and nothing else. No prompt: it may
+// run without a terminal, and a hand-edited .gitignore is replaced whole; the printed list is the warning.
+function refreshProject(args: { dir: string | undefined }, deps: InitDeps): 0 | 1 {
+  const dir = path.resolve(deps.cwd, args.dir ?? '.');
+
+  const missing = PROJECT_MARKERS.filter((name) => {
+    try {
+      return !fs.lstatSync(absolute(dir, name)).isFile();
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    deps.print(`blw init --refresh: ${dir} is not a monitoring project: ${missing.join(' and ')} missing. Nothing was written.`);
+    return 1;
+  }
+
+  // Classify every template-owned file before anything is printed or written.
+  const planned: { target: string; bytes: Buffer; action: RefreshAction }[] = [];
+  for (const file of TEMPLATE_FILES.filter((entry) => entry.owner === 'template')) {
+    let bytes: Buffer;
+    try {
+      bytes = renderTemplate(file, fs.readFileSync(path.join(templatesDir(deps.packageDir), ...file.source.split('/'))), deps.version);
+    } catch (error) {
+      deps.print(`blw init --refresh: the templates of this core cannot be read (${reason(error)}). Nothing was written.`);
+      return 1;
+    }
+    const target = absolute(dir, file.target);
+    let action: RefreshAction;
+    try {
+      const stat = fs.lstatSync(target);
+      if (!stat.isFile()) {
+        deps.print(`blw init --refresh: ${file.target} in ${dir} is not a regular file (a directory or a link). Nothing was written.`);
+        return 1;
+      }
+      action = fs.readFileSync(target).equals(bytes) ? 'up to date' : 'replace';
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        deps.print(`blw init --refresh: ${file.target} in ${dir} cannot be inspected (${reason(error)}). Nothing was written.`);
+        return 1;
+      }
+      action = 'create';
+    }
+    planned.push({ target: file.target, bytes, action });
+  }
+
+  deps.print(`Refreshing the template files in ${dir}:`);
+  for (const { target, action } of planned) {
+    deps.print(`  ${action.padEnd(10)}  ${target}`);
+  }
+
+  const replace = deps.replaceFile ?? writeFileAtomic;
+  let written = 0;
+  for (const { target, bytes, action } of planned) {
+    if (action === 'up to date') {
+      continue;
+    }
+    try {
+      replace(absolute(dir, target), bytes);
+    } catch (error) {
+      // Each replace is whole, so a file that was already replaced stays replaced.
+      deps.print(`blw init --refresh: writing ${target} failed (${reason(error)}).`);
+      return 1;
+    }
+    written += 1;
+  }
+  deps.print(`Done: ${written} written, ${planned.length - written} up to date.`);
+  return 0;
+}
+
 /** Writes the project into the directory; returns 0, or 1 with one or more lines that say why. */
-export function runInit(args: { dir: string | undefined }, deps: InitDeps): 0 | 1 {
+export function runInit(args: { dir: string | undefined; refresh: boolean }, deps: InitDeps): 0 | 1 {
+  if (args.refresh) {
+    return refreshProject(args, deps);
+  }
   // The version names the vendored package in package.json; nothing is created for a version that cannot.
   if (!CORE_VERSION_PATTERN.test(deps.version)) {
     deps.print(

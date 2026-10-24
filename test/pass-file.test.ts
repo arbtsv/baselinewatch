@@ -54,6 +54,19 @@ describe('pass file on disk', () => {
     assert.ok(fs.readFileSync(target, 'utf8').endsWith('}\n'));
   });
 
+  test('writeFileAtomic writes bytes unchanged', () => {
+    const bytes = Buffer.from([0x40, 0x0d, 0x0a, 0xff, 0x0d, 0x0a, 0x00, 0x80]);
+    const target = path.join(WORK, 'bytes', 'launcher.bin');
+    writeFileAtomic(target, bytes);
+    assert.ok(fs.readFileSync(target).equals(bytes));
+    writeFileAtomic(target, Buffer.from([0x01]));
+    assert.ok(fs.readFileSync(target).equals(Buffer.from([0x01])));
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(target)).filter((name) => name.endsWith('.tmp')),
+      [],
+    );
+  });
+
   test('an absent file reads as missing', () => {
     assert.deepEqual(readPassFile(path.join(WORK, 'nothing-here.json'), EXPECT), { state: 'missing' });
   });

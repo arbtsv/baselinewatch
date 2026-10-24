@@ -129,7 +129,7 @@ function initInto(dir: string, options: { version?: string; writeFile?: InitDeps
     deps.writeFile = options.writeFile;
   }
   try {
-    return { code: runInit({ dir }, deps), lines };
+    return { code: runInit({ dir, refresh: false }, deps), lines };
   } catch (error) {
     return { code: `threw: ${(error as Error).message}`, lines };
   }
@@ -386,6 +386,38 @@ describe('init arguments through main', () => {
     const harness = initDeps(path.join(REPO_ROOT, 'src', 'cli.ts'), WORK);
     assert.equal(await main(['init', '--help'], harness.deps), 0);
     assert.deepEqual(harness.lines, [...USAGE_LINES]);
+  });
+});
+
+// Reads and writes a file as latin1, so every byte, CR LF pairs included, survives the round trip.
+const editBytes = (file: string, change: (text: string) => string): void => {
+  fs.writeFileSync(file, change(fs.readFileSync(file, 'latin1')), 'latin1');
+};
+
+describe('refresh', () => {
+  test('lists an outdated launcher as replace, rewrites it from the template and leaves an up to date .gitignore', async () => {
+    const project = freshDir('refresh-tracer');
+    assert.equal(initInto(project).code, 0);
+    const launcher = path.join(project, 'monitor.bat');
+    editBytes(launcher, (text) => text.replace('rem blw-template: 1', 'rem blw-template: 0'));
+    assert.ok(!fs.readFileSync(launcher).equals(templateBytes('monitor.bat')), 'the launcher is outdated before the refresh');
+
+    const harness = initDeps(path.join(REPO_ROOT, 'src', 'cli.ts'), WORK);
+    const code = await main(['init', project, '--refresh'], harness.deps);
+    assert.equal(code, 0, harness.lines.join('\n'));
+    assert.deepEqual(harness.lines, [
+      `Refreshing the template files in ${project}:`,
+      '  replace     monitor.bat',
+      '  up to date  .gitignore',
+      'Done: 1 written, 1 up to date.',
+    ]);
+    assert.ok(fs.readFileSync(launcher).equals(templateBytes('monitor.bat')));
+    assert.equal(
+      harness.lines.some((line) => line.startsWith('RESULT=') || line.startsWith('REASON=')),
+      false,
+      'refresh prints no machine line',
+    );
+    assert.equal(harness.interruptHooks + harness.exitHooks, 0);
   });
 });
 

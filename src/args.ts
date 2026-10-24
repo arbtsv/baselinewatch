@@ -11,21 +11,22 @@ export type RunArgs =
   | { kind: 'help' }
   | { kind: 'version' }
   | { kind: 'usage'; problem: string }
-  | { kind: 'init'; dir: string | undefined }
+  | { kind: 'init'; dir: string | undefined; refresh: boolean }
   | { kind: 'init_usage'; problem: string };
 
 /** The help text, one line each; English only, because it is printed before any env.json is read. */
 export const USAGE_LINES: readonly string[] = [
   'Usage: blw run [--help] [--version]',
-  '       blw init [dir]',
+  '       blw init [dir] [--refresh]',
   '       blw --help | -h | --version | -v',
   '  --help     Show this help and exit',
   '  --version  Print the version of baselinewatch and exit',
+  '  --refresh  With init: rewrite only monitor.bat and .gitignore of an existing project from this core',
   '  dir        With init: where the project is written (default: the current directory)',
 ];
 
 const RUN_OPTIONS: readonly string[] = ['--help', '--version'];
-const INIT_OPTIONS: readonly string[] = ['--help'];
+const INIT_OPTIONS: readonly string[] = ['--help', '--refresh'];
 
 // The name of the option that caused a problem, as typed but without a value, printable and short.
 // The value of an option is never repeated, because it may be anything the caller typed.
@@ -43,14 +44,14 @@ function initUsage(problem: string): RunArgs {
   return { kind: 'init_usage', problem };
 }
 
-// The arguments after `init`: at most one directory, and --help.
+// The arguments after `init`: at most one directory, --refresh and --help.
 function parseInitArgs(rest: readonly string[]): RunArgs {
   try {
     const { values, positionals } = parseArgs({
       args: [...rest],
       strict: true,
       allowPositionals: true,
-      options: { help: { type: 'boolean' } },
+      options: { help: { type: 'boolean' }, refresh: { type: 'boolean' } },
     });
     if (values.help === true) {
       return { kind: 'help' };
@@ -62,7 +63,7 @@ function parseInitArgs(rest: readonly string[]): RunArgs {
     if (dir === '') {
       return initUsage('the directory argument is empty');
     }
-    return { kind: 'init', dir };
+    return { kind: 'init', dir, refresh: values.refresh === true };
   } catch (error) {
     switch ((error as { code?: unknown }).code) {
       case 'ERR_PARSE_ARGS_UNKNOWN_OPTION':

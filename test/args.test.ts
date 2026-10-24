@@ -33,11 +33,20 @@ describe('parseRunArgs', () => {
   });
 
   test('init alone writes into the current directory', () => {
-    assert.deepEqual(parseRunArgs(['init']), { kind: 'init', dir: undefined });
+    assert.deepEqual(parseRunArgs(['init']), { kind: 'init', dir: undefined, refresh: false });
   });
 
   test('init takes one directory', () => {
-    assert.deepEqual(parseRunArgs(['init', 'monitoring']), { kind: 'init', dir: 'monitoring' });
+    assert.deepEqual(parseRunArgs(['init', 'monitoring']), { kind: 'init', dir: 'monitoring', refresh: false });
+  });
+
+  test('init --refresh refreshes the current directory', () => {
+    assert.deepEqual(parseRunArgs(['init', '--refresh']), { kind: 'init', dir: undefined, refresh: true });
+  });
+
+  test('init with a directory and --refresh refreshes that directory', () => {
+    assert.deepEqual(parseRunArgs(['init', 'proj', '--refresh']), { kind: 'init', dir: 'proj', refresh: true });
+    assert.deepEqual(parseRunArgs(['init', '--refresh', 'proj']), { kind: 'init', dir: 'proj', refresh: true });
   });
 
   const REJECTED: Array<[string, string[]]> = [
@@ -132,7 +141,8 @@ describe('parseRunArgs for init', () => {
 describe('USAGE_LINES', () => {
   test('names the init command on a line of its own and keeps the run line first', () => {
     assert.equal(USAGE_LINES[0], 'Usage: blw run [--help] [--version]');
-    assert.ok(USAGE_LINES.includes('       blw init [dir]'));
+    assert.ok(USAGE_LINES.includes('       blw init [dir] [--refresh]'));
+    assert.ok(USAGE_LINES.some((line) => line.startsWith('  --refresh') && line.includes('monitor.bat') && line.includes('.gitignore')));
   });
 
   test('starts with the usage line and lists both options', () => {
