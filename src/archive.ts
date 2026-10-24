@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { removeQuietly } from './quiet.ts';
 
 /** The longest command line this module hands to CreateProcess; the Windows limit is 32,767 characters. */
 export const MAX_COMMAND_LINE = 30_000;
@@ -192,7 +193,8 @@ function startsWithSignature(file: string): boolean {
  * Archives the files (paths relative to runDir, written with '/') into finalZip through the temporary
  * name tempZip, which must end in .zip. Anything short of a finished zip, whether a tar that failed,
  * timed out or could not start, a missing file or an archive without the zip signature, removes the
- * temporary file, the list file and the staged copies and gives 'failed'. A command line too long for
+ * temporary file, the list file and the staged copies and gives 'failed'. The removals never change the
+ * outcome: one that cannot be done leaves its file behind. A command line too long for
  * the name list moves the names into a list file outside runDir. A name that is not ASCII cannot be
  * read by tar on every machine, so the files are then packed from copies under ASCII-only names.
  */
@@ -221,10 +223,11 @@ export async function buildZip(options: {
   } catch {
     return 'failed';
   } finally {
-    fs.rmSync(options.tempZip, { force: true });
+    // None of these may throw: the outcome is decided, and a file held by a scan is left for later.
+    removeQuietly(options.tempZip);
     for (const dir of [made.listDir, made.stageDir]) {
       if (dir !== undefined) {
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeQuietly(dir, { recursive: true });
       }
     }
   }
@@ -279,18 +282,18 @@ function underAny(relative: string, blocked: ReadonlySet<string>): boolean {
 /**
  * The files of the zip, as paths relative to runDir with '/': the report, the summary and the pass
  * files that exist, then every file under pass-1 and pass-2 test-results, sorted. Nothing in tainted
- * goes in, nor anything under a directory in tainted. When verified is given, a file under test-results
- * goes in only if it is in verified (the files a redaction walk read and found free of a value), so a
- * file that appeared after the walk, or sat in a directory the walk could not list, stays out. It never
- * throws; a directory that cannot be read contributes nothing.
+ * goes in, nor anything under a directory in tainted. A file under test-results goes in only if it is
+ * in verified (the files a redaction walk read and found free of a value), so a file that appeared after
+ * the walk, or sat in a directory the walk could not list, stays out, and an empty verified set takes
+ * none. It never throws; a directory that cannot be read contributes nothing.
  */
-export function zipFileList(runDir: string, tainted: ReadonlySet<string>, verified?: ReadonlySet<string>): string[] {
+export function zipFileList(runDir: string, tainted: ReadonlySet<string>, verified: ReadonlySet<string>): string[] {
   const fixed = FIXED_ENTRIES.filter((name) => isRegularFile(path.join(runDir, name)));
   const results: string[] = [];
   for (const pass of [1, 2]) {
     filesUnder(path.join(runDir, `pass-${pass}`, 'test-results'), runDir, results);
   }
   results.sort();
-  const checked = verified === undefined ? results : results.filter((name) => verified.has(name));
+  const checked = results.filter((name) => verified.has(name));
   return [...fixed, ...checked].filter((name) => !underAny(name, tainted));
 }
