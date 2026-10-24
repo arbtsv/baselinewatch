@@ -3,6 +3,13 @@
 // A scenario and a node name together form the project id "<scenario>--<node>" and a file name, so
 // the pattern excludes "--", path separators, dots, glob characters, spaces and names that start
 // with an underscore (such as __proto__).
+//
+// The account check lives here too: names end up in metrics.csv, runs.csv, summary.json and
+// report.txt, which are never redacted, so a name must not hold the account login or password.
+// The module loads no Playwright module.
+import type { Baselines } from './baselines.ts';
+import type { MonitorEnv } from './env.ts';
+import { ConfigError } from './errors.ts';
 
 export const NAME_PATTERN = /^[a-z0-9]+(?:[_-][a-z0-9]+)*$/;
 export const METRIC_PATTERN = /^[a-z][a-z0-9_]*$/;
@@ -24,4 +31,89 @@ export function nameProblem(kind: 'scenario' | 'node' | 'metric', name: string):
     return 'is a reserved device name on Windows';
   }
   return undefined;
+}
+
+/** A value of this many characters or more is a leak as a substring; a shorter one only as a whole word. */
+export const WHOLE_WORD_BELOW = 6;
+
+const METRIC_ALPHABET = /^[a-z0-9_]+$/;
+const NAME_ALPHABET = /^[a-z0-9_-]+$/;
+
+/**
+ * Which account field a name holds, or undefined. The name and the value are compared without case.
+ * A value with a character outside the alphabet of the name kind (a-z, 0-9, _ and, for scenario and
+ * node names, -) can never be part of such a name and is skipped. A value of WHOLE_WORD_BELOW or
+ * more characters is a leak when it occurs anywhere in the name; a shorter one is a leak only as a
+ * whole word, so login "ops" rejects "ops_page_ms" and "page_ops" and accepts "opsview_page_ms".
+ * Words are separated by _ (and by - in scenario and node names). The login is checked first. The
+ * value itself is never returned, logged or thrown, and a name can always be renamed to pass.
+ */
+export function leakedField(
+  account: { login: string; password: string },
+  name: string,
+  kind: 'metric' | 'scenario' | 'node' = 'metric',
+): 'login' | 'password' | undefined {
+  const alphabet = kind === 'metric' ? METRIC_ALPHABET : NAME_ALPHABET;
+  const lowered = name.toLowerCase();
+  const asWords = `_${lowered.replaceAll('-', '_')}_`;
+  for (const field of ['login', 'password'] as const) {
+    const value = account[field].toLowerCase();
+    if (value === '' || !alphabet.test(value)) {
+      continue;
+    }
+    const hit =
+      value.length >= WHOLE_WORD_BELOW ? lowered.includes(value) : asWords.includes(`_${value.replaceAll('-', '_')}_`);
+    if (hit) {
+      return field;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Throws a ConfigError on the first scenario name, node name or metric name that holds the account
+ * login or password (see leakedField). The message names the file, the scenario and the field and
+ * never the name or the value. Scenario names are checked before they appear in any later message.
+ */
+export function checkAccountNames(input: {
+  env: MonitorEnv;
+  baselines: Baselines;
+  envFile: string;
+  baselinesFile: string;
+}): void {
+  const { env, baselines, envFile, baselinesFile } = input;
+  const { account } = env;
+  for (const [scenario, body] of Object.entries(env.scenarios)) {
+    const scenarioField = leakedField(account, scenario, 'scenario');
+    if (scenarioField !== undefined) {
+      throw new ConfigError(
+        envFile,
+        `a scenario name contains the account ${scenarioField}`,
+        'Rename that scenario in env.json, baselines.json and its spec file',
+      );
+    }
+    for (const node of Object.keys(body.nodes)) {
+      const nodeField = leakedField(account, node, 'node');
+      if (nodeField !== undefined) {
+        throw new ConfigError(
+          envFile,
+          `a node name of scenario "${scenario}" contains the account ${nodeField}`,
+          'Rename that node in env.json',
+        );
+      }
+    }
+    if (!Object.hasOwn(baselines, scenario)) {
+      continue;
+    }
+    for (const metric of Object.keys(baselines[scenario] ?? {})) {
+      const metricField = leakedField(account, metric, 'metric');
+      if (metricField !== undefined) {
+        throw new ConfigError(
+          baselinesFile,
+          `a metric name of scenario "${scenario}" contains the account ${metricField}`,
+          `Rename that metric in baselines.json and in scenarios/${scenario}.spec.ts`,
+        );
+      }
+    }
+  }
 }

@@ -5,12 +5,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { Baselines } from '../src/baselines.ts';
 import { catalogFor } from '../src/i18n/index.ts';
 import { runLayout } from '../src/layout.ts';
 import { buildPassFile, passFileText, writeFileAtomic } from '../src/pass-file.ts';
 import type { PrecheckOk, PrelaunchFailure } from '../src/precheck.ts';
 import type { PassRun, PassRunOptions } from '../src/process.ts';
+import type { TarResult } from '../src/archive.ts';
 import type { PassProject, Summary } from '../src/protocol.ts';
 import { main, projectRootFrom, readCoreVersion, type RunDeps } from '../src/run.ts';
 
@@ -24,6 +26,7 @@ const SECOND_RUN_ID = '20261020T100001Z';
 const PROJECTS = ['demo--node-1', 'demo--node-2'];
 const PRINT_MARKER = 'marker-of-the-print';
 const CLEAN_EXIT: PassRun = { status: 0, timedOut: false, interrupted: false };
+const RUN_PID = 4242;
 
 let rootCounter = 0;
 
@@ -57,15 +60,21 @@ function writePass(options: PassRunOptions, projects: PassProject[]): void {
   );
 }
 
-function checked(locale: 'en' | 'ru' = 'en'): { ok: true; value: PrecheckOk } {
+const ACCOUNT = { login: 'placeholder-login', password: 'placeholder-password' };
+
+function checked(
+  locale: 'en' | 'ru' = 'en',
+  retentionDays = 30,
+  account: { login: string; password: string } = ACCOUNT,
+): { ok: true; value: PrecheckOk } {
   return {
     ok: true,
     value: {
       env: {
         environment: 'demo',
         locale,
-        account: { login: 'placeholder-login', password: 'placeholder-password' },
-        retention_days: 30,
+        account,
+        retention_days: retentionDays,
         scenarios: { demo: { nodes: { 'node-1': 'http://node-1.test/', 'node-2': 'http://node-2.test/' } } },
       },
       baselines: {} as Baselines,
@@ -84,8 +93,19 @@ type Harness = {
   sleeps: number[];
   /** How many prints threw on purpose. */
   printFailures: number;
+  /** The line transform that attachRedactor installed, and how often it was installed and removed again. */
+  transform: ((line: string) => string) | undefined;
+  redactorAttached: number;
+  redactorRemoved: number;
+  /** The calls of the fake tar runner. */
+  zipCalls: { file: string; args: string[] }[];
   /** Calls the handler registered through onInterrupt, as a signal would. */
   interrupt: () => void;
+  /** How many handlers were registered through onExit, and how many of them were removed again. */
+  exitRegistrations: number;
+  exitRemovals: number;
+  /** Calls the handlers that onExit holds, as the exit of the process would. */
+  fireExit: () => void;
   deps: RunDeps;
 };
 
@@ -96,10 +116,21 @@ function harness(options: {
   root?: string;
   /** Makes print throw (the first `times` calls) for the lines that `match`; such a line is not recorded. */
   printFailure?: { match: (line: string) => boolean; times: number };
+  /** The pids that count as alive for the run lock; the run's own pid is 4242. */
+  livePids?: readonly number[];
+  /** Runs inside the fake pre-launch checks, before they answer. */
+  duringPrechecks?: () => void;
+  /** A failing fake check still calls the onEnv hook first, as a check that fails after env.json loaded does. */
+  accountKnown?: boolean;
+  /** The platform the run believes it is on; win32 by default, so the zip step runs everywhere. */
+  platform?: NodeJS.Platform;
+  /** What the fake tar does: write a zip (default), leave a partial zip and exit 1, or write a plain tar and exit 0. */
+  zip?: 'ok' | 'fail' | 'plain';
 }): Harness {
   const made = options.root !== undefined && options.cliFile !== undefined ? { root: options.root, cliFile: options.cliFile } : makeRoot();
   let clock = Date.parse('2026-10-20T10:00:00.000Z');
   let handler: (() => void) | undefined;
+  const exitHandlers = new Set<() => void>();
   const state: Harness = {
     root: made.root,
     cliFile: options.cliFile ?? made.cliFile,
@@ -109,7 +140,18 @@ function harness(options: {
     unregistered: 0,
     sleeps: [],
     printFailures: 0,
+    transform: undefined,
+    redactorAttached: 0,
+    redactorRemoved: 0,
+    zipCalls: [],
     interrupt: () => handler?.(),
+    exitRegistrations: 0,
+    exitRemovals: 0,
+    fireExit: () => {
+      for (const exitHandler of [...exitHandlers]) {
+        exitHandler();
+      }
+    },
     deps: undefined as unknown as RunDeps,
   };
   state.deps = {
@@ -125,11 +167,18 @@ function harness(options: {
         state.printFailures += 1;
         throw new Error(PRINT_MARKER);
       }
-      state.lines.push(line);
+      state.lines.push(state.transform === undefined ? line : state.transform(line));
     },
-    prechecks: async () => {
+    prechecks: async (_root, _cliFile, _deps, hooks) => {
       state.prechecksCalls += 1;
-      return options.prechecks ?? checked();
+      options.duringPrechecks?.();
+      const result = options.prechecks ?? checked();
+      if (result.ok) {
+        hooks?.onEnv?.(result.value.env);
+      } else if (options.accountKnown === true) {
+        hooks?.onEnv?.(checked().value.env);
+      }
+      return result;
     },
     runPass: async (passOptions) => {
       state.passCalls.push(passOptions);
@@ -141,6 +190,36 @@ function harness(options: {
         state.unregistered += 1;
         handler = undefined;
       };
+    },
+    onExit: (exitHandler) => {
+      state.exitRegistrations += 1;
+      exitHandlers.add(exitHandler);
+      return () => {
+        state.exitRemovals += 1;
+        exitHandlers.delete(exitHandler);
+      };
+    },
+    pid: RUN_PID,
+    isAlive: (pid) => (options.livePids ?? [RUN_PID]).includes(pid),
+    attachRedactor: (transform) => {
+      state.redactorAttached += 1;
+      state.transform = transform;
+      return () => {
+        state.redactorRemoved += 1;
+        state.transform = undefined;
+      };
+    },
+    platform: options.platform ?? 'win32',
+    zip: async (file, args): Promise<TarResult> => {
+      state.zipCalls.push({ file, args: [...args] });
+      const output = args[args.indexOf('-f') + 1] as string;
+      const names = args.slice(args.indexOf('--') + 1).join('\n');
+      if (options.zip === 'plain') {
+        fs.writeFileSync(output, `plain tar\0${names}`);
+        return { status: 0, timedOut: false };
+      }
+      fs.writeFileSync(output, Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from(names)]));
+      return { status: options.zip === 'fail' ? 1 : 0, timedOut: false };
     },
   };
   return state;
@@ -642,5 +721,669 @@ describe('an interrupt', () => {
     });
     await main(['run'], h.deps);
     assert.equal(aborted, true);
+  });
+});
+
+describe('the run lock', () => {
+  const lockPath = (root: string): string => path.join(artifacts(root), '.lock');
+  const HOLDER = { pid: 7777, started_at: '2026-10-20T09:59:00.000Z', run_id: '20261020T095900Z' };
+  const SENTINELS = {
+    'summary.json': '{"sentinel":"summary"}\n',
+    'report.txt': 'sentinel report\n',
+    'runs.csv': 'run_id,result\nsentinel-run,PASS\n',
+  };
+
+  // A live run of pid 7777 that has written its lock and the files of its previous run.
+  function holdWithPeer(h: Harness): string {
+    fs.mkdirSync(artifacts(h.root), { recursive: true });
+    for (const [name, text] of Object.entries(SENTINELS)) {
+      fs.writeFileSync(path.join(artifacts(h.root), name), text);
+    }
+    const text = `${JSON.stringify(HOLDER)}\n`;
+    fs.writeFileSync(lockPath(h.root), text);
+    return text;
+  }
+
+  function expectUntouched(h: Harness, lockText: string): void {
+    for (const [name, text] of Object.entries(SENTINELS)) {
+      assert.equal(fs.readFileSync(path.join(artifacts(h.root), name), 'utf8'), text, name);
+    }
+    assert.equal(fs.readFileSync(lockPath(h.root), 'utf8'), lockText);
+    assert.equal(fs.existsSync(path.join(artifacts(h.root), 'runs')), false);
+    assert.deepEqual(fs.readdirSync(artifacts(h.root)).sort(), ['.lock', 'report.txt', 'runs.csv', 'summary.json']);
+  }
+
+  test('a live holder makes the run exit 3 with locked and writes nothing', async () => {
+    const h = harness({ livePids: [RUN_PID, HOLDER.pid] });
+    const lockText = holdWithPeer(h);
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=locked', 'RESULT=FAIL']);
+    assert.ok(h.lines.some((line) => line.includes('.lock')), h.lines.join('\n'));
+    assert.ok(h.lines.some((line) => line.includes(String(HOLDER.pid))), h.lines.join('\n'));
+    expectUntouched(h, lockText);
+    assert.equal(h.prechecksCalls, 0);
+    assert.equal(h.passCalls.length, 0);
+  });
+
+  test('a usage problem under a live lock is locked as well and leaves no summary of its own', async () => {
+    const h = harness({ livePids: [RUN_PID, HOLDER.pid] });
+    const lockText = holdWithPeer(h);
+    const code = await main(['run', '--bogus'], h.deps);
+    assert.equal(code, 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=locked', 'RESULT=FAIL']);
+    expectUntouched(h, lockText);
+    assert.equal(h.prechecksCalls, 0);
+  });
+
+  test('help and version take no lock and leave a held lock alone', async () => {
+    const h = harness({ livePids: [RUN_PID, HOLDER.pid] });
+    const lockText = holdWithPeer(h);
+    assert.equal(await main(['--help'], h.deps), 0);
+    assert.equal(await main(['run', '--version'], h.deps), 0);
+    expectUntouched(h, lockText);
+  });
+
+  test('a run holds the lock with its pid and run id while the pass works, and leaves none behind', async () => {
+    let seen: unknown;
+    const h = harness({
+      runPass: (options) => {
+        seen = JSON.parse(fs.readFileSync(lockPath(h.root), 'utf8'));
+        writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+        return CLEAN_EXIT;
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(seen, { pid: RUN_PID, started_at: '2026-10-20T10:00:00.000Z', run_id: FIRST_RUN_ID });
+    assert.equal(fs.existsSync(lockPath(h.root)), false);
+    assert.deepEqual(fs.readdirSync(artifacts(h.root)).filter((name) => name.startsWith('.lock')), []);
+  });
+
+  test('a pass that throws still ends with report_not_built and no lock', async () => {
+    const h = harness({
+      runPass: () => {
+        throw new Error('marker-of-the-failure');
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=report_not_built', 'RESULT=FAIL']);
+    assert.equal(fs.existsSync(lockPath(h.root)), false);
+  });
+
+  test('an artifacts path that is a file ends with config, names the path and writes nothing', async () => {
+    const h = harness({});
+    fs.mkdirSync(h.root, { recursive: true });
+    fs.writeFileSync(artifacts(h.root), 'not a directory');
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 3);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=config', 'RESULT=FAIL']);
+    assert.ok(h.lines.some((line) => line.includes(artifacts(h.root))), h.lines.join('\n'));
+    assert.equal(fs.readFileSync(artifacts(h.root), 'utf8'), 'not a directory');
+    assert.equal(h.prechecksCalls, 0);
+    assert.equal(h.passCalls.length, 0);
+  });
+});
+
+describe('a taken over lock and the interrupt paths', () => {
+  const lockPath = (root: string): string => path.join(artifacts(root), '.lock');
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+  // The lock of a run that died: its pid is not among the live ones.
+  function leaveDeadLock(root: string): void {
+    fs.mkdirSync(artifacts(root), { recursive: true });
+    fs.writeFileSync(lockPath(root), `${JSON.stringify({ pid: 7777, started_at: '2026-10-20T09:59:00.000Z', run_id: '20261020T095900Z' })}\n`);
+  }
+
+  test('a lock of a dead process is taken over: the run passes and the report carries one warning', async () => {
+    const h = harness({ runPass: cleanPass });
+    leaveDeadLock(h.root);
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    const summary = readSummary(h.root);
+    assert.equal(summary.warnings.filter((warning) => warning.code === 'lock_taken_over').length, 1);
+    assert.deepEqual(summary.warnings, [{ code: 'lock_taken_over' }]);
+    const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning({ code: 'lock_taken_over' })));
+    assert.equal(fs.existsSync(lockPath(h.root)), false);
+    assert.deepEqual(fs.readdirSync(artifacts(h.root)).filter((name) => name.startsWith('.lock')), []);
+  });
+
+  test('the warning of the lock comes after the warnings of the passes', async () => {
+    const h = harness({
+      runPass: (options) => {
+        const layout = runLayout(options.root, { runId: options.runId, pass: options.pass, manual: false });
+        fs.writeFileSync(path.join(path.dirname(layout.passFile), `pass-${options.pass}.history-error.log`), 'metrics.csv: EISDIR\n');
+        return cleanPass(options);
+      },
+    });
+    leaveDeadLock(h.root);
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, [{ code: 'history_not_written', pass: 1 }, { code: 'lock_taken_over' }]);
+  });
+
+  test('a lock that was taken fresh carries no warning', async () => {
+    const h = harness({ runPass: cleanPass });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+  });
+
+  test('an interrupt during the pre-launch checks starts no pass, ends with report_not_built and frees the lock', async () => {
+    const h = harness({ runPass: cleanPass, duringPrechecks: () => h.interrupt() });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 1);
+    assert.equal(h.passCalls.length, 0);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=report_not_built', 'RESULT=FAIL']);
+    assert.equal(readSummary(h.root).reason, 'report_not_built');
+    assert.equal(runsCsvLines(h.root).length, 2);
+    assert.equal(fs.existsSync(lockPath(h.root)), false);
+    assert.equal(h.unregistered, 1);
+  });
+
+  test('the exit hook is registered once, removes the lock when it fires and is removed before main resolves', async () => {
+    let lockDuringPass: boolean | undefined;
+    let lockAfterExit: boolean | undefined;
+    const h = harness({
+      runPass: (options) => {
+        lockDuringPass = fs.existsSync(lockPath(h.root));
+        h.fireExit();
+        lockAfterExit = fs.existsSync(lockPath(h.root));
+        return cleanPass(options);
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(lockDuringPass, true);
+    assert.equal(lockAfterExit, false);
+    assert.equal(h.exitRegistrations, 1);
+    assert.equal(h.exitRemovals, 1);
+    h.fireExit();
+    assert.equal(fs.existsSync(lockPath(h.root)), false);
+  });
+
+  test('a locked run registers no exit hook and no interrupt handler', async () => {
+    const h = harness({ livePids: [RUN_PID, 7777] });
+    leaveDeadLock(h.root);
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.equal(h.exitRegistrations, 0);
+    assert.equal(h.unregistered, 0);
+  });
+});
+
+describe('retention', () => {
+  const OLD = '20261018T100000Z';
+  const RECENT = '20261020T090000Z';
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+
+  // Old and recent run directories and zips, the history files and the manual run, as an earlier week left them.
+  function leaveHistory(root: string): { old: string[]; kept: string[] } {
+    const dir = artifacts(root);
+    const runDir = (id: string): string => {
+      const target = path.join(dir, 'runs', id, 'pass-1');
+      fs.mkdirSync(target, { recursive: true });
+      fs.writeFileSync(path.join(target, 'trace.txt'), 'trace');
+      return path.join(dir, 'runs', id);
+    };
+    const file = (...parts: string[]): string => {
+      const target = path.join(dir, ...parts);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'x');
+      return target;
+    };
+    const old = [runDir(OLD), file(`report_${OLD}.zip`), file(`.report_${OLD}.77.tmp.zip`)];
+    const kept = [runDir(RECENT), file(`report_${RECENT}.zip`), runDir('manual'), file('metrics.csv'), file('cli-error.log')];
+    fs.writeFileSync(path.join(dir, 'runs.csv'), 'run_id,result\nearlier-run,PASS\n');
+    return { old, kept };
+  }
+
+  test('a run removes the old run directories and zips and keeps the recent ones and the history files', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('en', 1) });
+    const { old, kept } = leaveHistory(h.root);
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    for (const target of old) {
+      assert.equal(fs.existsSync(target), false, target);
+    }
+    for (const target of kept) {
+      assert.equal(fs.existsSync(target), true, target);
+    }
+    assert.deepEqual(readSummary(h.root).warnings, []);
+    const csv = runsCsvLines(h.root);
+    assert.equal(csv.length, 3);
+    assert.deepEqual(csv.slice(0, 2), ['run_id,result', 'earlier-run,PASS']);
+    assert.ok((csv[2] as string).startsWith(`${FIRST_RUN_ID},`));
+    assert.equal(fs.existsSync(path.join(artifacts(h.root), 'runs', FIRST_RUN_ID)), true);
+  });
+
+  test('retention_days 0 keeps everything', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('en', 0) });
+    const { old, kept } = leaveHistory(h.root);
+    assert.equal(await main(['run'], h.deps), 0);
+    for (const target of [...old, ...kept]) {
+      assert.equal(fs.existsSync(target), true, target);
+    }
+  });
+
+  test('a run that is not ready deletes nothing', async () => {
+    const h = harness({ prechecks: { ok: false, failure: { reason: 'config', message: '[config] env.json: not found' } } });
+    const { old, kept } = leaveHistory(h.root);
+    assert.equal(await main(['run'], h.deps), 3);
+    for (const target of [...old, ...kept]) {
+      assert.equal(fs.existsSync(target), true, target);
+    }
+  });
+
+  test('a usage problem deletes nothing', async () => {
+    const h = harness({ prechecks: checked('en', 1) });
+    const { old } = leaveHistory(h.root);
+    assert.equal(await main(['run', '--bogus'], h.deps), 3);
+    assert.equal(h.prechecksCalls, 0);
+    for (const target of old) {
+      assert.equal(fs.existsSync(target), true, target);
+    }
+  });
+
+  test('an interrupt before the passes deletes nothing', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('en', 1), duringPrechecks: () => h.interrupt() });
+    const { old } = leaveHistory(h.root);
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.equal(h.passCalls.length, 0);
+    for (const target of old) {
+      assert.equal(fs.existsSync(target), true, target);
+    }
+  });
+});
+
+// A directory that a live process uses as its working directory cannot be deleted on Windows.
+describe('retention while a process holds a run directory', { skip: process.platform !== 'win32' }, () => {
+  test('the removal that fails is counted in one warning and the verdict does not change', async () => {
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+        return CLEAN_EXIT;
+      },
+      prechecks: checked('en', 1),
+    });
+    const held = path.join(artifacts(h.root), 'runs', '20261018T100000Z', 'pass-1');
+    fs.mkdirSync(held, { recursive: true });
+    fs.writeFileSync(path.join(held, 'trace.txt'), 'trace');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: held, stdio: 'ignore' });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve());
+        child.once('error', reject);
+      });
+      const code = await main(['run'], h.deps);
+      assert.equal(code, 0);
+      assert.equal(h.lines.at(-1), 'RESULT=PASS');
+      assert.deepEqual(readSummary(h.root).warnings, [{ code: 'retention_failed', count: 1 }]);
+      const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+      assert.ok(report.includes(catalogFor('en').warning({ code: 'retention_failed', count: 1 })));
+    } finally {
+      child.kill();
+      await new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+        } else {
+          child.once('exit', () => resolve());
+        }
+      });
+    }
+  });
+});
+
+describe('redaction', () => {
+  const { login: LOGIN, password: PASSWORD } = ACCOUNT;
+  const SECRET_TEXT = `- textbox "Login": ${LOGIN}\n- textbox "Password": ${PASSWORD}\n`;
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+  const layoutOf = (options: PassRunOptions) => runLayout(options.root, { runId: options.runId, pass: options.pass, manual: false });
+  const contextFile = (options: PassRunOptions): string => path.join(layoutOf(options).outputDir, 'test', 'error-context.md');
+  const htmlFile = (options: PassRunOptions): string => path.join(layoutOf(options).htmlDir, 'data', 'x.md');
+
+  // What a broken scenario leaves: an error context that quotes the typed values, and html report data.
+  function leaveSecretFiles(options: PassRunOptions): void {
+    for (const file of [contextFile(options), htmlFile(options)]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, SECRET_TEXT);
+    }
+  }
+
+  test('no console line holds a value, the error context is redacted and the html data and the pass file keep their bytes', async () => {
+    let passBytes: Buffer | undefined;
+    const h = harness({
+      runPass: (options) => {
+        options.print(`typing ${LOGIN} then ${PASSWORD}`);
+        cleanPass(options);
+        leaveSecretFiles(options);
+        passBytes = fs.readFileSync(layoutOf(options).passFile);
+        return CLEAN_EXIT;
+      },
+    });
+    const code = await main(['run'], h.deps);
+    assert.equal(code, 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    for (const line of h.lines) {
+      assert.ok(!line.includes(LOGIN) && !line.includes(PASSWORD), line);
+    }
+    assert.ok(h.lines.includes('typing *** then ***'), h.lines.join('\n'));
+    const [call] = h.passCalls as [PassRunOptions];
+    const context = fs.readFileSync(contextFile(call), 'utf8');
+    assert.equal(context, '- textbox "Login": ***\n- textbox "Password": ***\n');
+    assert.equal(fs.readFileSync(htmlFile(call), 'utf8'), SECRET_TEXT);
+    assert.ok(fs.readFileSync(layoutOf(call).passFile).equals(passBytes as Buffer));
+  });
+
+  test('the error context of pass 1 is already redacted while pass 2 runs', async () => {
+    let seenInPass2: string | undefined;
+    const h = harness({
+      runPass: (options) => {
+        if (options.pass === 1) {
+          writePass(options, [project('node-1', 'slow'), project('node-2', 'ok')]);
+          leaveSecretFiles(options);
+        } else {
+          const first = runLayout(options.root, { runId: options.runId, pass: 1, manual: false });
+          seenInPass2 = fs.readFileSync(path.join(first.outputDir, 'test', 'error-context.md'), 'utf8');
+          writePass(options, [project('node-1', 'ok')]);
+        }
+        return CLEAN_EXIT;
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.equal(h.passCalls.length, 2);
+    assert.equal(seenInPass2, '- textbox "Login": ***\n- textbox "Password": ***\n');
+  });
+
+  test('a login shorter than the minimum is not redacted and is named in a warning without its value', async () => {
+    const h = harness({
+      runPass: (options) => {
+        options.print(`typing ab then ${PASSWORD}`);
+        return cleanPass(options);
+      },
+      prechecks: checked('en', 30, { login: 'ab', password: PASSWORD }),
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    const summary = readSummary(h.root);
+    assert.deepEqual(summary.warnings, [{ code: 'secret_too_short', field: 'login' }]);
+    for (const warning of summary.warnings) {
+      assert.ok(!Object.values(warning).includes('ab'));
+    }
+    assert.ok(h.lines.includes('typing ab then ***'), h.lines.join('\n'));
+    const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning({ code: 'secret_too_short', field: 'login' })));
+  });
+
+  test('both values too short give one warning each, login first', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('en', 30, { login: 'ab', password: 'xy' }) });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.deepEqual(readSummary(h.root).warnings, [
+      { code: 'secret_too_short', field: 'login' },
+      { code: 'secret_too_short', field: 'password' },
+    ]);
+  });
+
+  test('a login that is a word of the pass file keeps the pass file and the verdict intact', async () => {
+    let passBytes: Buffer | undefined;
+    const h = harness({
+      runPass: (options) => {
+        writePass(options, options.pass === 1 ? [project('node-1', 'slow'), project('node-2', 'ok')] : [project('node-1', 'ok')]);
+        passBytes ??= fs.readFileSync(layoutOf(options).passFile);
+        return CLEAN_EXIT;
+      },
+      prechecks: checked('en', 30, { login: 'node', password: PASSWORD }),
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+    const first = runLayout(h.root, { runId: FIRST_RUN_ID, pass: 1, manual: false });
+    assert.ok(fs.readFileSync(first.passFile).equals(passBytes as Buffer));
+    assert.ok(fs.readFileSync(first.passFile, 'utf8').includes('"node"'));
+    assert.equal(readSummary(h.root).nodes[0]?.recheck, 'ok');
+  });
+
+  test('a configuration failure after env.json loaded prints its message with the login replaced', async () => {
+    const message = `[config] baselines.json: the metric of ${LOGIN} is unknown`;
+    const h = harness({ prechecks: { ok: false, failure: { reason: 'config', message } }, accountKnown: true });
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.ok(h.lines.includes('[config] baselines.json: the metric of *** is unknown'), h.lines.join('\n'));
+    for (const line of h.lines) {
+      assert.ok(!line.includes(LOGIN), line);
+    }
+  });
+
+  test('a failure before env.json loaded attaches no redactor', async () => {
+    const message = '[config] env.json: file not found';
+    const h = harness({ prechecks: { ok: false, failure: { reason: 'config', message } } });
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.equal(h.redactorAttached, 0);
+    assert.equal(h.redactorRemoved, 0);
+    assert.ok(h.lines.includes(message));
+  });
+
+  test('the redactor is attached once and removed once after the last line', async () => {
+    const h = harness({ runPass: cleanPass });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.redactorAttached, 1);
+    assert.equal(h.redactorRemoved, 1);
+    assert.equal(h.transform, undefined);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+  });
+
+  test('the redactor is removed after an internal error as well', async () => {
+    const h = harness({
+      runPass: () => {
+        throw new Error('marker-of-the-failure');
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.equal(h.redactorAttached, 1);
+    assert.equal(h.redactorRemoved, 1);
+  });
+});
+
+describe('the zip', () => {
+  const SCREENSHOT = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02]);
+  const layoutOf = (options: PassRunOptions) => runLayout(options.root, { runId: options.runId, pass: options.pass, manual: false });
+  const runDirOf = (root: string): string => path.join(artifacts(root), 'runs', FIRST_RUN_ID);
+  const reportZip = (root: string): string => path.join(artifacts(root), `report_${FIRST_RUN_ID}.zip`);
+  const tempZip = (root: string): string => path.join(artifacts(root), `.report_${FIRST_RUN_ID}.${RUN_PID}.tmp.zip`);
+
+  // What one pass leaves besides its pass file: an error context, a masked screenshot, the html report and the stderr log.
+  function leaveFiles(options: PassRunOptions, extra?: (resultsDir: string, runDir: string) => void): void {
+    const layout = layoutOf(options);
+    const put = (file: string, content: string | Buffer): void => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+    };
+    put(path.join(layout.outputDir, 't', 'error-context.md'), '- page snapshot\n');
+    put(path.join(layout.outputDir, 't', 'attachments', 'screenshot-1.png'), SCREENSHOT);
+    put(path.join(layout.htmlDir, 'index.html'), '<html></html>');
+    put(layout.stderrLog, 'a warning\n');
+    extra?.(layout.outputDir, path.dirname(layout.passFile));
+  }
+
+  function leaveClean(options: PassRunOptions, extra?: (resultsDir: string, runDir: string) => void): PassRun {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    leaveFiles(options, extra);
+    return CLEAN_EXIT;
+  }
+
+  const slowThenOk = (options: PassRunOptions): PassRun => {
+    writePass(options, options.pass === 1 ? [project('node-1', 'slow'), project('node-2', 'ok')] : [project('node-1', 'ok')]);
+    return CLEAN_EXIT;
+  };
+
+  test('a clean run on Windows packs the report, the summary, the pass file and the test results with the system tar', async () => {
+    const h = harness({ runPass: (options) => leaveClean(options) });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.zipCalls.length, 1);
+    const [call] = h.zipCalls as [{ file: string; args: string[] }];
+    assert.ok(call.file.endsWith('System32\\tar.exe'), call.file);
+    assert.deepEqual(call.args, [
+      '-a',
+      '-c',
+      '-f',
+      tempZip(h.root),
+      '-C',
+      runDirOf(h.root),
+      '--',
+      'report.txt',
+      'summary.json',
+      'pass-1.json',
+      'pass-1/test-results/t/attachments/screenshot-1.png',
+      'pass-1/test-results/t/error-context.md',
+    ]);
+    assert.ok(fs.readFileSync(reportZip(h.root)).subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])));
+    assert.equal(fs.existsSync(tempZip(h.root)), false);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+  });
+
+  test('the zip holds the second pass files as well, and never the html report or a log', async () => {
+    const h = harness({
+      runPass: (options) => {
+        slowThenOk(options);
+        if (options.pass === 1) {
+          leaveFiles(options);
+        } else {
+          const layout = layoutOf(options);
+          fs.mkdirSync(path.join(layout.outputDir, 'u'), { recursive: true });
+          fs.writeFileSync(path.join(layout.outputDir, 'u', 'error-context.md'), 'second\n');
+          fs.mkdirSync(layout.htmlDir, { recursive: true });
+          fs.writeFileSync(path.join(layout.htmlDir, 'index.html'), '<html></html>');
+        }
+        return CLEAN_EXIT;
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    const names = (h.zipCalls[0] as { args: string[] }).args.slice(7);
+    assert.ok(names.includes('pass-2.json'));
+    assert.ok(names.includes('pass-2/test-results/u/error-context.md'));
+    for (const name of names) {
+      assert.ok(!name.includes('html/'), name);
+      assert.ok(!name.endsWith('.log'), name);
+    }
+  });
+
+  for (const platform of ['win32', 'linux'] as const) {
+    test(`the per-run copies of the summary and the report equal the root files on ${platform}`, async () => {
+      const h = harness({ runPass: (options) => leaveClean(options), platform });
+      await main(['run'], h.deps);
+      for (const name of ['summary.json', 'report.txt']) {
+        const copy = fs.readFileSync(path.join(runDirOf(h.root), name));
+        assert.ok(copy.length > 0, name);
+        assert.ok(copy.equals(fs.readFileSync(path.join(artifacts(h.root), name))), name);
+      }
+    });
+  }
+
+  test('off Windows the runner is never called, the run says so and keeps the exit code of the Windows run', async () => {
+    const onWindows = harness({ runPass: slowThenOk });
+    const windowsCode = await main(['run'], onWindows.deps);
+    const elsewhere = harness({ runPass: slowThenOk, platform: 'linux' });
+    const code = await main(['run'], elsewhere.deps);
+    assert.equal(code, windowsCode);
+    assert.equal(code, 1);
+    assert.equal(elsewhere.zipCalls.length, 0);
+    assert.deepEqual(elsewhere.lines.slice(-2), onWindows.lines.slice(-2));
+    const warnings = readSummary(elsewhere.root).warnings;
+    assert.deepEqual(warnings.at(-1), { code: 'zip_skipped' });
+    assert.equal(fs.existsSync(reportZip(elsewhere.root)), false);
+    const report = fs.readFileSync(path.join(artifacts(elsewhere.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning({ code: 'zip_skipped' })));
+    assert.ok(fs.readFileSync(path.join(runDirOf(elsewhere.root), 'summary.json'), 'utf8').includes('zip_skipped'));
+  });
+
+  for (const [name, mode] of [
+    ['a tar that exits with status 1', 'fail'],
+    ['a tar that writes a plain tar archive', 'plain'],
+  ] as const) {
+    test(`${name} adds zip_failed in all four report files and changes nothing else`, async () => {
+      const working = harness({ runPass: slowThenOk });
+      const workingCode = await main(['run'], working.deps);
+      const h = harness({ runPass: slowThenOk, zip: mode });
+      const code = await main(['run'], h.deps);
+      assert.equal(code, workingCode);
+      assert.deepEqual(h.lines.slice(-2), working.lines.slice(-2));
+      assert.deepEqual(h.lines.slice(-2), ['REASON=slow', 'RESULT=FAIL']);
+      const summary = readSummary(h.root);
+      assert.deepEqual(summary.warnings.at(-1), { code: 'zip_failed' });
+      const copy = JSON.parse(fs.readFileSync(path.join(runDirOf(h.root), 'summary.json'), 'utf8')) as Summary;
+      assert.deepEqual(copy, summary);
+      const sentence = catalogFor('en').warning({ code: 'zip_failed' });
+      assert.ok(fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8').includes(sentence));
+      assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'report.txt'), 'utf8').includes(sentence));
+      assert.equal(runsCsvLines(h.root).length, 2);
+      assert.equal(fs.existsSync(reportZip(h.root)), false);
+      assert.equal(fs.existsSync(tempZip(h.root)), false);
+    });
+  }
+
+  test('a binary file that holds the login stays on disk, stays out of the zip and is counted', async () => {
+    const h = harness({
+      runPass: (options) =>
+        leaveClean(options, (resultsDir) => {
+          fs.writeFileSync(path.join(resultsDir, 't', 'blob.bin'), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(ACCOUNT.login), Buffer.from([0])]));
+        }),
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    const summary = readSummary(h.root);
+    assert.ok(summary.warnings.some((warning) => warning.code === 'binary_left_out' && warning.count === 1), JSON.stringify(summary.warnings));
+    const names = (h.zipCalls[0] as { args: string[] }).args.slice(7);
+    assert.ok(!names.some((name) => name.includes('blob.bin')), names.join('\n'));
+    assert.ok(names.includes('pass-1/test-results/t/attachments/screenshot-1.png'));
+    assert.equal(fs.existsSync(path.join(runDirOf(h.root), 'pass-1', 'test-results', 't', 'blob.bin')), true);
+    const copy = JSON.parse(fs.readFileSync(path.join(runDirOf(h.root), 'summary.json'), 'utf8')) as Summary;
+    assert.deepEqual(copy.warnings, summary.warnings);
+    const sentence = catalogFor('en').warning({ code: 'binary_left_out', count: 1 });
+    assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'report.txt'), 'utf8').includes(sentence));
+  });
+
+  test('a stderr log in a single-byte code page that holds the login is not counted and stays on disk', async () => {
+    const stderr = Buffer.concat([Buffer.from([0xc0, 0xe9]), Buffer.from(ACCOUNT.login), Buffer.from([0xff])]);
+    const h = harness({
+      runPass: (options) => {
+        const code = leaveClean(options);
+        fs.writeFileSync(layoutOf(options).stderrLog, stderr);
+        return code;
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.ok(!readSummary(h.root).warnings.some((warning) => warning.code === 'binary_left_out'));
+    assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'pass-1.stderr.log')).equals(stderr));
+  });
+
+  test('a run that is not ready builds no zip, adds no zip warning and still writes its report copies', async () => {
+    const h = harness({ prechecks: { ok: false, failure: { reason: 'config', message: '[config] env.json: file not found' } } });
+    assert.equal(await main(['run'], h.deps), 3);
+    assert.equal(h.zipCalls.length, 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+    assert.equal(fs.existsSync(reportZip(h.root)), false);
+    for (const name of ['summary.json', 'report.txt']) {
+      assert.ok(fs.readFileSync(path.join(runDirOf(h.root), name)).equals(fs.readFileSync(path.join(artifacts(h.root), name))), name);
+    }
+  });
+
+  test('a usage problem builds no zip and adds no zip warning', async () => {
+    const h = harness({});
+    assert.equal(await main(['run', '--bogus'], h.deps), 3);
+    assert.equal(h.zipCalls.length, 0);
+    assert.deepEqual(readSummary(h.root).warnings, []);
+    assert.equal(fs.existsSync(path.join(runDirOf(h.root), 'summary.json')), true);
+  });
+
+  test('a run that fails with an internal error builds no zip', async () => {
+    const h = harness({
+      runPass: () => {
+        throw new Error('marker-of-the-failure');
+      },
+    });
+    assert.equal(await main(['run'], h.deps), 1);
+    assert.equal(h.zipCalls.length, 0);
   });
 });

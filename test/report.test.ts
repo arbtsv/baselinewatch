@@ -145,6 +145,30 @@ describe('English report', () => {
     assert.ok(text.includes('Warnings\n  The file of pass 2 is missing or damaged; its results were not used.\n'));
     assert.ok(text.includes('  The second look at demo / node-1 left no result.\n'));
   });
+
+  test('the new warnings are written in their order as catalog sentences', () => {
+    const text = renderReport(
+      summaryOf({
+        warnings: [
+          { code: 'lock_taken_over' },
+          { code: 'secret_too_short', field: 'password' },
+          { code: 'binary_left_out', count: 2 },
+          { code: 'zip_skipped' },
+        ],
+      }),
+      en,
+    );
+    assert.ok(
+      text.includes(
+        'Warnings\n' +
+          '  A lock left by an earlier run that is no longer active was taken over.\n' +
+          '  The account password is shorter than 3 characters and is not hidden in the run output.\n' +
+          '  Binary files left out of the zip because they contain the account login or password: 2.\n' +
+          '  The zip was not built: it is made on Windows only.\n',
+      ),
+      text,
+    );
+  });
 });
 
 describe('Russian report', () => {

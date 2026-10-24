@@ -340,6 +340,16 @@ describe('the shipped template', () => {
     }
   });
 
+  test('both templates spell out retention_days with its default', () => {
+    // loadEnv defaults a missing key to the same number, so only the raw text can prove the key is there.
+    for (const file of [template, demoCopy]) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Json;
+      assert.ok(Object.hasOwn(raw, 'retention_days'), `${file} has no retention_days key`);
+      assert.equal(raw.retention_days, DEFAULT_RETENTION_DAYS);
+      assert.equal(raw.retention_days, 30);
+    }
+  });
+
   test('the demo project copy is byte-for-byte identical', () => {
     assert.equal(Buffer.compare(fs.readFileSync(template), fs.readFileSync(demoCopy)), 0);
   });

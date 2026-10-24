@@ -7,6 +7,7 @@ import { loadBaselines, type Baselines } from './baselines.ts';
 import { loadEnv, type MonitorEnv } from './env.ts';
 import type { MonitorOptions, MonitorWorkerOptions } from './fixture.ts';
 import { MANUAL_RUN, readRunContext, runLayout, type RunContext } from './layout.ts';
+import { checkAccountNames } from './names.ts';
 import { GLOBAL_TIMEOUT_MS } from './protocol.ts';
 import { checkScenarioFiles } from './scenarios.ts';
 
@@ -68,10 +69,13 @@ export type MonitorConfigInput = {
  * Pure: turns the two parsed files into a config object. It reads no file and prints nothing.
  * Projects follow the order of env.json (scenarios first, then nodes). Each project is named
  * "<scenario>--<node>", runs scenarios/<scenario>.spec.ts and uses the node URL as written in
- * env.json as the base URL. The account is not copied anywhere.
+ * env.json as the base URL. The account is not copied anywhere. It throws a ConfigError when a
+ * scenario, node or metric name holds the account login or password (the pre-launch checks of
+ * blw run make the same check); otherwise it reads no file and prints nothing.
  */
 export function buildMonitorConfig(input: MonitorConfigInput): PlaywrightTestConfig<MonitorOptions, MonitorWorkerOptions> {
   const { env, baselines, rootDir, envFile, baselinesFile, run } = input;
+  checkAccountNames({ env, baselines, envFile, baselinesFile });
   const projects: NonNullable<PlaywrightTestConfig<MonitorOptions, MonitorWorkerOptions>['projects']> = [];
   for (const [scenario, body] of Object.entries(env.scenarios)) {
     const scenarioBaselines = Object.hasOwn(baselines, scenario) ? baselines[scenario] : {};
@@ -159,6 +163,8 @@ export function defineMonitorConfig(
   const baselinesFile = path.resolve(rootDir, options.baselines ?? 'baselines.json');
   const env = loadEnv(envFile);
   const baselines = loadBaselines(baselinesFile);
+  // The scenario file message names the scenario, so the account check comes first.
+  checkAccountNames({ env, baselines, envFile, baselinesFile });
   checkScenarioFiles(rootDir, Object.keys(env.scenarios));
   return defineConfig(buildMonitorConfig({ env, baselines, rootDir, envFile, baselinesFile, run }));
 }

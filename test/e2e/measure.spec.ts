@@ -3,8 +3,8 @@
 //
 // Run: npm run e2e -- test/e2e/measure.spec.ts
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import {
   cleanArtifacts,
@@ -17,9 +17,11 @@ import {
   withScenario,
   type JsonTest,
 } from '../helpers/demo.ts';
+import { countColour, decodePng } from '../helpers/png.ts';
 import { startPortal } from '../helpers/portal.ts';
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
+const MANUAL_RESULTS = path.join(DEMO_ARTIFACTS_DIR, 'runs', 'manual', 'pass-1', 'test-results');
 
 function screenshots(item: JsonTest): JsonTest['attachments'] {
   return item.attachments.filter((attachment) => attachment.name === 'screenshot');
@@ -30,57 +32,35 @@ function expectOnePng(item: JsonTest): void {
   expect(found).toHaveLength(1);
   const [shot] = found as [JsonTest['attachments'][number]];
   expect(shot.contentType).toBe('image/png');
-  // The fixture attaches the bytes from memory, so the JSON report carries them as base64 text and
-  // no path; the html reporter is the one that writes the single file.
-  expect(shot.path).toBeUndefined();
-  expect(shot.body).toBeTruthy();
-  const bytes = Buffer.from(shot.body as string, 'base64');
+  // The fixture attaches a file, so the JSON report names the copy that Playwright made in the output
+  // directory of the test and carries no bytes.
+  expect(shot.body).toBeUndefined();
+  expect(shot.path).toBeDefined();
+  const file = shot.path as string;
+  expect(path.isAbsolute(file)).toBe(true);
+  expect(fs.existsSync(file)).toBe(true);
+  const bytes = fs.readFileSync(file);
   expect([...bytes.subarray(0, 4)]).toEqual(PNG_SIGNATURE);
+  const image = decodePng(bytes);
+  expect(image.width).toBeGreaterThan(0);
+  expect(image.height).toBeGreaterThan(0);
+  expect(path.relative(MANUAL_RESULTS, file).startsWith('..')).toBe(false);
+  // One file in the whole output of the test: a second copy next to the attachment would show here.
+  const testDirectory = path.dirname(path.dirname(file));
+  const copies = (fs.readdirSync(testDirectory, { recursive: true }) as string[]).filter((name) =>
+    path.basename(name).startsWith('screenshot'),
+  );
+  expect(copies).toHaveLength(1);
+}
+
+function shotDirectories(): string[] {
+  return fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('blw-shot-')).sort();
 }
 
 /** Counts the pixels of the mask colour (#FF00FF) in the screenshot attachment of a test. */
 function maskPixels(item: JsonTest): number {
   const [shot] = screenshots(item) as [JsonTest['attachments'][number]];
-  const png = Buffer.from(shot.body as string, 'base64');
-  const width = png.readUInt32BE(16);
-  const height = png.readUInt32BE(20);
-  const channels = png[25] === 6 ? 4 : 3;
-  const parts: Buffer[] = [];
-  for (let offset = 8; offset < png.length; ) {
-    const length = png.readUInt32BE(offset);
-    if (png.toString('latin1', offset + 4, offset + 8) === 'IDAT') parts.push(png.subarray(offset + 8, offset + 8 + length));
-    offset += 12 + length;
-  }
-  const raw = zlib.inflateSync(Buffer.concat(parts));
-  const stride = width * channels;
-  let previous = Buffer.alloc(stride);
-  let count = 0;
-  for (let y = 0; y < height; y++) {
-    const filter = raw[y * (stride + 1)] as number;
-    const line = Buffer.from(raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)));
-    for (let i = 0; i < stride; i++) {
-      const left = i >= channels ? (line[i - channels] as number) : 0;
-      const up = previous[i] as number;
-      const upLeft = i >= channels ? (previous[i - channels] as number) : 0;
-      let add = 0;
-      if (filter === 1) add = left;
-      else if (filter === 2) add = up;
-      else if (filter === 3) add = (left + up) >> 1;
-      else if (filter === 4) {
-        const guess = left + up - upLeft;
-        const dl = Math.abs(guess - left);
-        const du = Math.abs(guess - up);
-        const dul = Math.abs(guess - upLeft);
-        add = dl <= du && dl <= dul ? left : du <= dul ? up : upLeft;
-      }
-      line[i] = ((line[i] as number) + add) & 0xff;
-    }
-    for (let x = 0; x < width; x++) {
-      if (line[x * channels] === 255 && line[x * channels + 1] === 0 && line[x * channels + 2] === 255) count++;
-    }
-    previous = line;
-  }
-  return count;
+  return countColour(decodePng(fs.readFileSync(shot.path as string)), [0xff, 0x00, 0xff]);
 }
 
 async function onlyTest(args: string[]): Promise<JsonTest> {
@@ -149,10 +129,13 @@ test('after a pass: one PNG screenshot attachment', async () => {
   const portal = await startPortal('ok');
   try {
     const env = await demoEnv({ 'node-1': portal.url });
+    const before = shotDirectories();
     const item = await withDemoEnv(env, () => onlyTest([]));
     expect(item.status).toBe('passed');
     expect(item.errors).toEqual([]);
     expectOnePng(item);
+    // The temporary source of the attachment is gone once the test has ended.
+    expect(shotDirectories()).toEqual(before);
   } finally {
     await portal.stop();
   }

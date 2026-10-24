@@ -5,7 +5,9 @@
 // when Playwright is missing or installed twice.
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { print } from './output.ts';
+import { runTar } from './archive.ts';
+import { processIsAlive } from './lock.ts';
+import { print, setPrintSink } from './output.ts';
 import { runPrechecks } from './precheck.ts';
 import { interruptSignals, runPlaywrightPass } from './process.ts';
 import { main, type RunDeps } from './run.ts';
@@ -26,6 +28,26 @@ const deps: RunDeps = {
       for (const signal of signals) {
         process.off(signal, handler);
       }
+    };
+  },
+  onExit: (handler) => {
+    process.once('exit', handler);
+    return () => {
+      process.off('exit', handler);
+    };
+  },
+  pid: process.pid,
+  isAlive: processIsAlive,
+  platform: process.platform,
+  zip: runTar,
+  // The lines relayed from the Playwright child go through the same print() as the lines of this
+  // command, so one sink in front of the console covers both.
+  attachRedactor: (redact) => {
+    const previous = setPrintSink((line) => {
+      previous(redact(line));
+    });
+    return () => {
+      setPrintSink(previous);
     };
   },
 };

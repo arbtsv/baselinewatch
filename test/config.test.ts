@@ -249,6 +249,44 @@ describe('buildMonitorConfig: fixed run policy', () => {
   });
 });
 
+describe('buildMonitorConfig: account values in names', () => {
+  const ENTRY = { reference_ms: 300, maxRatio: 3 };
+  const withLogin = (login: string, baselines: Baselines) => {
+    const input = memoryInput();
+    return { ...input, env: { ...input.env, account: { login, password: SECRET } }, baselines };
+  };
+
+  test('a metric name that holds the login is a ConfigError that names the file, the scenario and the field', () => {
+    const error = assertConfigError(
+      () => buildMonitorConfig(withLogin('opsuser', { alpha: { opsuser_ms: ENTRY } })),
+      /contains the account login/,
+    );
+    assert.ok(error.message.includes('baselines.json'), error.message);
+    assert.ok(error.message.includes('"alpha"'), error.message);
+    assert.ok(!error.message.includes('opsuser'), error.message);
+  });
+
+  test('a scenario name that holds the login names env.json and not the name', () => {
+    const input = memoryInput();
+    const env = { ...input.env, account: { login: 'beta', password: SECRET } };
+    const error = assertConfigError(() => buildMonitorConfig({ ...input, env }), /contains the account login/);
+    assert.ok(error.message.includes('env.json'), error.message);
+    assert.ok(!error.message.includes('beta'), error.message);
+  });
+
+  test('a short login accepts a metric name that only starts with it', () => {
+    const built = buildMonitorConfig(withLogin('ops', { alpha: { opsview_page_ms: ENTRY } }));
+    assert.deepEqual(
+      (built.projects ?? []).map((project) => project.name),
+      ['alpha--node-1', 'alpha--node-2', 'beta--node-1', 'beta--node-2'],
+    );
+  });
+
+  test('a short login rejects the same name as a whole word', () => {
+    assertConfigError(() => buildMonitorConfig(withLogin('ops', { alpha: { ops_page_ms: ENTRY } })), /contains the account login/);
+  });
+});
+
 describe('buildMonitorConfig: secrets and determinism', () => {
   test('the serialized config holds neither the login nor the password', () => {
     const text = JSON.stringify(buildMonitorConfig(memoryInput()));

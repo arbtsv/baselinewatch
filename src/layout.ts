@@ -10,6 +10,28 @@ export const MANUAL_RUN_ID = 'manual' as const;
 /** UTC, compact, whole seconds: 20261020T123456Z. Nothing else may become a directory name. */
 export const RUN_ID_PATTERN = /^\d{8}T\d{6}Z$/;
 
+// The run id inside a zip name, written out so that no other text can match.
+const RUN_ID_IN_NAME = String.raw`(\d{8}T\d{6}Z)`;
+
+/** report_<run id>.zip at the artifacts root; the first group is the run id. */
+export const REPORT_ZIP_PATTERN = new RegExp(`^report_${RUN_ID_IN_NAME}\\.zip$`);
+
+/**
+ * .report_<run id>.<pid>.tmp.zip, the name a zip has while it is being built; the first group is the run
+ * id. It ends in .zip because tar picks the archive format from the extension.
+ */
+export const TEMP_ZIP_PATTERN = new RegExp(`^\\.report_${RUN_ID_IN_NAME}\\.\\d+\\.tmp\\.zip$`);
+
+/** The name of the finished zip of a run. */
+export function reportZipName(runId: string): string {
+  return `report_${runId}.zip`;
+}
+
+/** The name of the zip of a run while the process with this pid builds it. */
+export function tempZipName(runId: string, pid: number): string {
+  return `.report_${runId}.${pid}.tmp.zip`;
+}
+
 export type RunContext = {
   runId: string;
   pass: 1 | 2;
@@ -46,6 +68,8 @@ export type RunLayout = {
   summaryJson: string;
   /** <artifactsDir>/report.txt */
   reportTxt: string;
+  /** <artifactsDir>/report_<run id>.zip */
+  reportZip: string;
 };
 
 const RUN_FIX = 'Unset both for a manual run, or start the run with blw run';
@@ -113,5 +137,6 @@ export function runLayout(rootDir: string, run: RunContext): RunLayout {
     runsCsv: path.join(artifactsDir, 'runs.csv'),
     summaryJson: path.join(artifactsDir, 'summary.json'),
     reportTxt: path.join(artifactsDir, 'report.txt'),
+    reportZip: path.join(artifactsDir, reportZipName(run.runId)),
   };
 }
