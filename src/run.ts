@@ -1,5 +1,6 @@
 // `blw run`: finds the project, checks it, runs Playwright and turns the pass files into the run
-// files, the console lines and the exit code. Every outside effect (clock, sleep, output, the checks
+// files, the console lines and the exit code. `blw init` is routed from here too, ahead of everything
+// that belongs to a run. Every outside effect (clock, sleep, output, the checks
 // and the Playwright child) comes in through RunDeps, so the whole command can be driven in a test.
 // The verdict comes from the pass files alone; the exit status of Playwright is never read. The run
 // lock (artifacts/.lock) is taken before the first write under artifacts/, so a second run that finds
@@ -15,6 +16,7 @@ import { buildZip, isZipCandidate, tarPath, zipFileList, type TarRunner } from '
 import { appendCsv, RUNS_CSV_HEADER, runsCsvLine } from './csv.ts';
 import type { Account, Locale } from './env.ts';
 import { catalogFor } from './i18n/index.ts';
+import { runInit } from './init.ts';
 import { historyErrorLogFor, runIdFrom, runLayout, tempZipName, type RunLayout } from './layout.ts';
 import { acquireLock, LOCK_FILE, type LockContent, type LockResult } from './lock.ts';
 import { decide, exitLines, notReady, slowProjects, toSummary, type Decision } from './outcome.ts';
@@ -57,6 +59,8 @@ export type RunDeps = {
   platform: NodeJS.Platform;
   /** Runs the system tar with the given executable and arguments; a test answers it without a real tar. */
   zip: TarRunner;
+  /** The directory a relative init directory is resolved against; the caller's directory, also under npx. */
+  cwd: () => string;
 };
 
 /** What main keeps for its cleanup: the run once it has an id, and the function that removes the redactor. */
@@ -528,6 +532,23 @@ export async function main(argv: readonly string[], deps: RunDeps): Promise<0 | 
   if (args.kind === 'version') {
     deps.print(`${PACKAGE_NAME} ${readCoreVersion(deps.cliFile)}`);
     return 0;
+  }
+  // Init is not a run. It is routed before the project root because, under npx, the cache directory
+  // looks like a project root and a run would take a lock there; it prints no machine lines and
+  // leaves no run record.
+  if (args.kind === 'init_usage') {
+    printAll([`blw init: ${args.problem}`, ...USAGE_LINES], deps);
+    return 1;
+  }
+  if (args.kind === 'init') {
+    return runInit(args, {
+      packageDir: packageDirOf(deps.cliFile),
+      version: readCoreVersion(deps.cliFile),
+      cwd: deps.cwd(),
+      print: (line) => {
+        printAll([line], deps);
+      },
+    });
   }
   const root = projectRootFrom(deps.cliFile);
   if (root === undefined) {

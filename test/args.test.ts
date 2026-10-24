@@ -1,4 +1,4 @@
-// Tests for src/args.ts: blw run accepts only run, --help and --version.
+// Tests for src/args.ts: blw accepts the commands run and init and the options --help and --version.
 // Run: node --test test/args.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,9 +32,16 @@ describe('parseRunArgs', () => {
     assert.deepEqual(parseRunArgs(['-h', '--bogus']), { kind: 'help' });
   });
 
+  test('init alone writes into the current directory', () => {
+    assert.deepEqual(parseRunArgs(['init']), { kind: 'init', dir: undefined });
+  });
+
+  test('init takes one directory', () => {
+    assert.deepEqual(parseRunArgs(['init', 'monitoring']), { kind: 'init', dir: 'monitoring' });
+  });
+
   const REJECTED: Array<[string, string[]]> = [
     ['no argument', []],
-    ['init', ['init']],
     ['another command', ['report']],
     ['an unknown option', ['run', '--bogus']],
     ['a Playwright option', ['run', '--retries=1']],

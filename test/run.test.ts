@@ -221,6 +221,7 @@ function harness(options: {
       };
     },
     platform: options.platform ?? 'win32',
+    cwd: () => made.root,
     zip: async (file, args): Promise<TarResult> => {
       state.zipCalls.push({ file, args: [...args] });
       const output = args[args.indexOf('-f') + 1] as string;
@@ -399,7 +400,7 @@ describe('a run that is not ready', () => {
     assert.deepEqual(h.lines.slice(-2), ['REASON=browser', 'RESULT=FAIL']);
   });
 
-  for (const argv of [['run', '--bogus'], [], ['init']]) {
+  for (const argv of [['run', '--bogus'], [], ['report']]) {
     test(`arguments ${JSON.stringify(argv)} are a usage problem that still leaves a summary`, async () => {
       const h = harness({});
       const code = await main(argv, h.deps);
