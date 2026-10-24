@@ -27,6 +27,7 @@ import type { PassRun, PassRunOptions } from './process.ts';
 import { isMachineLine, type NotReadyReason, type RunWarning, type Summary } from './protocol.ts';
 import { createRedactor, redactRunDirectory, type Redactor } from './redact.ts';
 import { consoleSummary, internalErrorLines, notReadyLines, renderReport } from './report.ts';
+import { launcherWarning } from './template-version.ts';
 
 export type RunDeps = {
   /** Absolute path of the running cli module. */
@@ -462,6 +463,12 @@ async function executeRun(
   state.run = run;
   if (lock.takenOver) {
     run.warnings.push({ code: 'lock_taken_over' });
+  }
+  // The launcher warning is added before the usage branch and the checks, so every run that has a run id
+  // carries it, a not-ready one included; it never changes the verdict or the exit code.
+  const outdated = launcherWarning(root);
+  if (outdated !== undefined) {
+    run.warnings.push(outdated);
   }
   // The last run's files are removed first, so a stale pair is never read as this run's.
   fs.rmSync(layout.reportTxt, { force: true });

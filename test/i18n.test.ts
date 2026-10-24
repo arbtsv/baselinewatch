@@ -29,7 +29,15 @@ const WARNINGS: RunWarning[] = WARNING_CODES.flatMap((code) => [
   { code, field: 'login' as const, count: 3 },
 ]);
 
-const NEW_CODES = ['lock_taken_over', 'retention_failed', 'secret_too_short', 'binary_left_out', 'zip_skipped', 'zip_failed'] as const;
+const NEW_CODES = [
+  'lock_taken_over',
+  'retention_failed',
+  'secret_too_short',
+  'binary_left_out',
+  'zip_skipped',
+  'zip_failed',
+  'launcher_outdated',
+] as const;
 
 // Every sentence of a catalog rendered for every token: [label, rendered text, expected token].
 function samples(catalog: Catalog): { label: string; text: string; token?: string }[] {
@@ -92,7 +100,7 @@ describe('catalog completeness', () => {
 });
 
 describe('the new warnings', () => {
-  test('the vocabulary holds the six new codes after the earlier three', () => {
+  test('the vocabulary holds the seven new codes after the earlier three', () => {
     assert.deepEqual(WARNING_CODES.slice(3), NEW_CODES);
   });
 

@@ -15,6 +15,7 @@ import type { PassRun, PassRunOptions } from '../src/process.ts';
 import type { TarResult } from '../src/archive.ts';
 import type { PassProject, Summary } from '../src/protocol.ts';
 import { main, projectRootFrom, readCoreVersion, type RunDeps } from '../src/run.ts';
+import { LAUNCHER_FILE, TEMPLATE_VERSION } from '../src/template-version.ts';
 
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'blw-run-'));
 after(() => {
@@ -937,6 +938,27 @@ describe('a taken over lock and the interrupt paths', () => {
     assert.equal(await main(['run'], h.deps), 3);
     assert.equal(h.exitRegistrations, 0);
     assert.equal(h.unregistered, 0);
+  });
+});
+
+describe('an outdated launcher', () => {
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+  const writeLauncher = (root: string, content: string | Buffer): void => {
+    fs.writeFileSync(path.join(root, LAUNCHER_FILE), content);
+  };
+
+  test('a monitor.bat with an older marker adds launcher_outdated and keeps the exit code', async () => {
+    const h = harness({ runPass: cleanPass });
+    writeLauncher(h.root, '@echo off\r\nrem blw-template: 0\r\n');
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    const warning = { code: 'launcher_outdated' as const, found: 0, expected: TEMPLATE_VERSION };
+    assert.deepEqual(readSummary(h.root).warnings, [warning]);
+    const report = fs.readFileSync(path.join(artifacts(h.root), 'report.txt'), 'utf8');
+    assert.ok(report.includes(catalogFor('en').warning(warning)));
   });
 });
 
