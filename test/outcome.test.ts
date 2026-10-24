@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { decide, exitLines, notReady, slowProjects, toSummary } from '../src/outcome.ts';
+import { FAIL_REASONS, isMachineLine, NOT_READY_REASONS, RESULT_TOKENS } from '../src/protocol.ts';
 import { buildPassFile, passFileText, readPassFile, writeFileAtomic, type PassRead } from '../src/pass-file.ts';
 import type { PassFile, PassProject } from '../src/protocol.ts';
 
@@ -421,5 +422,41 @@ describe('toSummary', () => {
     assert.equal(summary.locale, 'ru');
     assert.equal(summary.started_at, '2026-10-20T10:15:00.000Z');
     assert.equal(summary.finished_at, '2026-10-20T10:15:30.000Z');
+  });
+});
+
+describe('isMachineLine', () => {
+  test('is true for every line exitLines can print', () => {
+    for (const reason of [...NOT_READY_REASONS, ...FAIL_REASONS]) {
+      assert.equal(isMachineLine(`REASON=${reason}`), true, reason);
+    }
+    for (const token of RESULT_TOKENS) {
+      assert.equal(isMachineLine(`RESULT=${token}`), true, token);
+    }
+    for (const line of exitLines({ result: 'FAIL', reason: 'locked' })) {
+      assert.equal(isMachineLine(line), true, line);
+    }
+  });
+
+  test('is false for a line that only looks like one', () => {
+    for (const line of [
+      'RESULT=PASS ',
+      ' RESULT=PASS',
+      'RESULT=pass',
+      'RESULT=',
+      'RESULT=PASSED',
+      'RESULT=hunter2',
+      'REASON=',
+      'REASON=locked ',
+      'REASON=lock',
+      'REASON=secret-value',
+      'XRESULT=PASS',
+      'REASON=slow RESULT=FAIL',
+      'result=PASS',
+      'Result: PASS',
+      '',
+    ]) {
+      assert.equal(isMachineLine(line), false, JSON.stringify(line));
+    }
   });
 });
