@@ -4,6 +4,12 @@
 // launcher keeps its CRLF line ends; the only text that changes is the version token in package.json.
 // This module uses node:fs and node:path only: nothing from Playwright and nothing from the run module.
 // Everything it needs from outside comes in through InitDeps.
+//
+// Init never overwrites or deletes what it did not create. Every target is checked first and a single
+// conflict stops the command before the first write; every file is then created exclusively, so a
+// file that appeared after the check is never overwritten either. A failed write removes exactly the
+// files and the empty directories this run created. A process that is killed in the middle can still
+// leave part of a project; the next init reports those files as conflicts and writes nothing.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -46,7 +52,10 @@ export type InitDeps = {
   /** The directory a relative project directory is resolved against. */
   cwd: string;
   print: (line: string) => void;
-  /** Writes one new file; the default creates it exclusively and fails when the path exists. */
+  /**
+   * Creates one new file. It either creates the file with all its bytes or throws and leaves nothing of
+   * its own behind; it must fail when the path exists. The default creates the file exclusively.
+   */
   writeFile?: (file: string, bytes: Uint8Array) => void;
 };
 
@@ -74,19 +83,77 @@ function reason(error: unknown): string {
   return typeof code === 'string' ? code : error instanceof Error ? error.message : 'unknown error';
 }
 
-function exists(target: string): boolean {
+// What a path is, without following a link: a link counts as something else than a real directory.
+type Kind = 'missing' | 'directory' | 'other';
+
+function kindOf(target: string): Kind {
   try {
-    fs.lstatSync(target);
-    return true;
-  } catch {
-    return false;
+    return fs.lstatSync(target).isDirectory() ? 'directory' : 'other';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'other';
   }
 }
 
 const absolute = (dir: string, relative: string): string => path.join(dir, ...relative.split('/'));
 
+// The exclusive create: it fails with EEXIST when the path exists, also when the path is a planted link.
+const EXCLUSIVE_CREATE = { flag: 'wx' } as const;
+
+function createFile(file: string, bytes: Uint8Array): void {
+  const handle = fs.openSync(file, EXCLUSIVE_CREATE.flag);
+  try {
+    fs.writeFileSync(handle, bytes);
+    fs.closeSync(handle);
+  } catch (error) {
+    // The path was created by the open above, so the partial file is ours to remove.
+    try {
+      fs.closeSync(handle);
+    } catch {
+      // Already closed.
+    }
+    fs.rmSync(file, { force: true });
+    throw error;
+  }
+}
+
+// Every path that init would create and that is already taken, relative, once each, in manifest order.
+function findConflicts(dir: string, targets: readonly string[]): string[] {
+  const conflicts = new Set<string>();
+  for (const target of targets) {
+    const parts = target.split('/');
+    let reachable = true;
+    for (let length = 1; length < parts.length; length += 1) {
+      const parent = parts.slice(0, length).join('/');
+      const kind = kindOf(absolute(dir, parent));
+      if (kind === 'other') {
+        conflicts.add(parent);
+      }
+      if (kind !== 'directory') {
+        reachable = false;
+        break;
+      }
+    }
+    if (reachable && kindOf(absolute(dir, target)) !== 'missing') {
+      conflicts.add(target);
+    }
+  }
+  for (const projectDir of PROJECT_DIRS) {
+    if (kindOf(absolute(dir, projectDir)) === 'other') {
+      conflicts.add(projectDir);
+    }
+  }
+  return [...conflicts];
+}
+
 /** Writes the project into the directory; returns 0, or 1 with one or more lines that say why. */
 export function runInit(args: { dir: string | undefined }, deps: InitDeps): 0 | 1 {
+  // The version names the vendored package in package.json; nothing is created for a version that cannot.
+  if (!CORE_VERSION_PATTERN.test(deps.version)) {
+    deps.print(
+      'blw init: the version of this baselinewatch package cannot be read, so the vendored package cannot be named. Nothing was written.',
+    );
+    return 1;
+  }
   const dir = path.resolve(deps.cwd, args.dir ?? '.');
 
   const rendered: { file: TemplateFile; bytes: Buffer }[] = [];
@@ -105,11 +172,18 @@ export function runInit(args: { dir: string | undefined }, deps: InitDeps): 0 | 
       deps.print(`blw init: ${dir} exists and is not a directory. Nothing was written.`);
       return 1;
     }
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      deps.print(`blw init: ${dir} cannot be used (${reason(error)}). Nothing was written.`);
+      return 1;
+    }
     // The directory does not exist yet; it is created below.
   }
 
-  const conflicts = rendered.filter(({ file }) => exists(absolute(dir, file.target))).map(({ file }) => file.target);
+  const conflicts = findConflicts(
+    dir,
+    rendered.map(({ file }) => file.target),
+  );
   if (conflicts.length > 0) {
     deps.print(`blw init: ${dir} already holds files that init would create:`);
     for (const conflict of conflicts) {
@@ -119,15 +193,51 @@ export function runInit(args: { dir: string | undefined }, deps: InitDeps): 0 | 
     return 1;
   }
 
-  const write = deps.writeFile ?? ((file: string, bytes: Uint8Array): void => fs.writeFileSync(file, bytes, { flag: 'wx' }));
-  fs.mkdirSync(dir, { recursive: true });
-  for (const { file, bytes } of rendered) {
-    const target = absolute(dir, file.target);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    write(target, bytes);
-  }
-  for (const projectDir of PROJECT_DIRS) {
-    fs.mkdirSync(absolute(dir, projectDir), { recursive: true });
+  const write = deps.writeFile ?? createFile;
+  const madeFiles: string[] = [];
+  const madeDirs: string[] = [];
+  let writing = 'the target directory';
+  // Creates a missing directory and the missing ones above it, and remembers each one it made.
+  const makeDirectory = (target: string): void => {
+    if (kindOf(target) !== 'missing') {
+      return;
+    }
+    makeDirectory(path.dirname(target));
+    fs.mkdirSync(target);
+    madeDirs.push(target);
+  };
+  try {
+    makeDirectory(dir);
+    for (const { file, bytes } of rendered) {
+      writing = file.target;
+      const target = absolute(dir, file.target);
+      makeDirectory(path.dirname(target));
+      write(target, bytes);
+      madeFiles.push(target);
+    }
+    for (const projectDir of PROJECT_DIRS) {
+      writing = `${projectDir}/`;
+      makeDirectory(absolute(dir, projectDir));
+    }
+  } catch (error) {
+    // Only what this run made goes: the files first, then its directories from the deepest up, and a
+    // directory that somebody else has filled meanwhile stays.
+    for (const file of madeFiles.reverse()) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // A file that cannot be removed stays; the line below still reports the failure.
+      }
+    }
+    for (const made of madeDirs.reverse()) {
+      try {
+        fs.rmdirSync(made);
+      } catch {
+        // Not empty, or already gone.
+      }
+    }
+    deps.print(`blw init: writing ${writing} failed (${reason(error)}). The files this run created were removed.`);
+    return 1;
   }
 
   deps.print(`Created a monitoring project in ${dir}:`);
