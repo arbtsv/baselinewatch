@@ -1,5 +1,5 @@
 {
-  "name": "demo-portal",
+  "name": "monitoring-project",
   "private": true,
   "type": "module",
   "dependencies": {

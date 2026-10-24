@@ -2,11 +2,12 @@
 // Run: node --test test/init.test.ts
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { USAGE_LINES } from '../src/args.ts';
-import { renderTemplate, runInit, TEMPLATE_FILES, type InitDeps } from '../src/init.ts';
+import { renderTemplate, runInit, TEMPLATE_FILES, VERSION_TOKEN, type InitDeps } from '../src/init.ts';
 import { main, type RunDeps } from '../src/run.ts';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
@@ -385,5 +386,147 @@ describe('init arguments through main', () => {
     const harness = initDeps(path.join(REPO_ROOT, 'src', 'cli.ts'), WORK);
     assert.equal(await main(['init', '--help'], harness.deps), 0);
     assert.deepEqual(harness.lines, [...USAGE_LINES]);
+  });
+});
+
+// The numbers of a version or of a comparator operand, a missing part counting as zero.
+const numbersOf = (text: string): number[] => {
+  const parts = text.split('.').map(Number);
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+};
+
+const compareVersions = (left: number[], right: number[]): number => {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+  return 0;
+};
+
+// True when the version satisfies every comparator of a range such as ">=1.61 <2". Only the operators
+// >=, <=, >, < and = with up to three numeric parts are understood; anything else throws.
+function satisfiesRange(version: string, range: string): boolean {
+  return range
+    .trim()
+    .split(/\s+/)
+    .every((comparator) => {
+      const match = /^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$/.exec(comparator);
+      if (match === null) {
+        throw new Error(`unsupported comparator in the range: ${comparator}`);
+      }
+      const order = compareVersions(numbersOf(version), numbersOf(match[2] as string));
+      switch (match[1] ?? '=') {
+        case '>=':
+          return order >= 0;
+        case '<=':
+          return order <= 0;
+        case '>':
+          return order > 0;
+        case '<':
+          return order < 0;
+        default:
+          return order === 0;
+      }
+    });
+}
+
+const DEMO_DIR = path.join(REPO_ROOT, 'examples', 'demo-portal');
+const LAUNCHER_NAME = 'monitor.bat';
+
+// The files git tracks under a folder of the repository, relative to that folder; a missing git fails the test.
+function trackedFiles(folder: string): string[] {
+  const result = spawnSync('git', ['ls-files', '-z', '--', folder], { cwd: REPO_ROOT, encoding: 'utf8' });
+  assert.equal(result.error, undefined, 'git must be available to list the tracked files');
+  assert.equal(result.status, 0, result.stderr);
+  const prefix = `${folder}/`;
+  return result.stdout
+    .split('\0')
+    .filter((entry) => entry !== '')
+    .map((entry) => entry.slice(prefix.length));
+}
+
+// Every file under a folder, relative with forward slashes.
+function filesUnder(folder: string): string[] {
+  return fs
+    .readdirSync(folder, { recursive: true })
+    .map((entry) => String(entry))
+    .filter((entry) => fs.statSync(path.join(folder, entry)).isFile())
+    .map((entry) => entry.split(path.sep).join('/'))
+    .sort();
+}
+
+describe('the templates and the demo project', () => {
+  test('the manifest lists exactly the files under templates', () => {
+    assert.deepEqual([...TEMPLATE_FILES.map((file) => file.source)].sort(), filesUnder(path.join(REPO_ROOT, 'templates')));
+  });
+
+  test('no template and no demo file except the launchers holds a carriage return', () => {
+    const files = [
+      ...filesUnder(path.join(REPO_ROOT, 'templates')).map((file) => path.join(REPO_ROOT, 'templates', ...file.split('/'))),
+      ...trackedFiles('examples/demo-portal').map((file) => path.join(DEMO_DIR, ...file.split('/'))),
+    ].filter((file) => path.basename(file) !== LAUNCHER_NAME);
+    assert.ok(files.length >= 13, `expected at least 13 files, found ${files.length}`);
+    const withCarriageReturn = files.filter((file) => fs.readFileSync(file).includes(0x0d)).map((file) => path.relative(REPO_ROOT, file));
+    assert.deepEqual(withCarriageReturn, [], 'check the folder out again after the attribute change');
+  });
+
+  test('every manifest target equals the file of the demo project byte for byte', () => {
+    const dir = freshDir('demo-equal');
+    const result = initInto(dir);
+    assert.equal(result.code, 0, result.lines.join('\n'));
+    const differing = MANIFEST_TARGETS.filter(
+      (target) => !fs.readFileSync(path.join(dir, ...target.split('/'))).equals(fs.readFileSync(path.join(DEMO_DIR, ...target.split('/')))),
+    );
+    assert.deepEqual(differing, [], `these targets differ from examples/demo-portal: ${differing.join(', ')}`);
+  });
+
+  test('git tracks exactly the init targets and server.mjs in the demo project', () => {
+    assert.deepEqual(trackedFiles('examples/demo-portal').sort(), [...MANIFEST_TARGETS, 'server.mjs'].sort());
+  });
+
+  test('the package template holds the token once and renders the manifest of the project', () => {
+    const template = fs.readFileSync(path.join(REPO_ROOT, 'templates', 'package.json'), 'utf8');
+    assert.equal(template.split(VERSION_TOKEN).length - 1, 1);
+    const source = TEMPLATE_FILES.find((file) => file.source === 'package.json') as (typeof TEMPLATE_FILES)[number];
+    const manifest = JSON.parse(renderTemplate(source, Buffer.from(template, 'utf8'), '0.1.0').toString('utf8')) as {
+      name: string;
+      private: boolean;
+      type: string;
+      dependencies: Record<string, string>;
+    };
+    assert.equal(manifest.name, 'monitoring-project');
+    assert.equal(manifest.private, true);
+    assert.equal(manifest.type, 'module');
+    assert.deepEqual(Object.keys(manifest.dependencies).sort(), ['@playwright/test', 'baselinewatch']);
+    assert.equal(manifest.dependencies['baselinewatch'], 'file:vendor/baselinewatch-0.1.0.tgz');
+    const core = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      devDependencies: Record<string, string>;
+      peerDependencies: Record<string, string>;
+    };
+    const pin = manifest.dependencies['@playwright/test'] as string;
+    assert.equal(pin, core.devDependencies['@playwright/test']);
+    assert.ok(satisfiesRange(pin, core.peerDependencies['@playwright/test'] as string), `${pin} is outside the peer range`);
+  });
+
+  test('the range helper rejects a version below and a version above the peer range', () => {
+    assert.equal(satisfiesRange('1.60.9', '>=1.61 <2'), false);
+    assert.equal(satisfiesRange('2.0.0', '>=1.61 <2'), false);
+    assert.equal(satisfiesRange('1.61.0', '>=1.61 <2'), true);
+    assert.equal(satisfiesRange('1.64.1', '>=1.61 <2'), true);
+  });
+
+  test('the starter scenario starts with the two header lines and measures the login', () => {
+    const lines = fs.readFileSync(path.join(REPO_ROOT, 'templates', 'scenarios', 'demo.spec.ts'), 'utf8').split('\n');
+    assert.equal(lines[0], '// The demo scenario: it signs in to the invented demo portal and measures three steps.');
+    assert.equal(lines[1], '// Replace the steps with those of your own portal; every measure() name needs an entry in baselines.json.');
+    assert.equal(lines[2], '');
+    assert.ok(lines.some((line) => line.includes("measure('login_ms'")));
+  });
+
+  test('the gitignore template lists exactly the four ignored paths', () => {
+    const lines = fs.readFileSync(path.join(REPO_ROOT, 'templates', 'gitignore'), 'utf8').split('\n');
+    assert.deepEqual(lines.filter((line) => line !== ''), ['env.json', 'artifacts/', 'node/', 'node_modules/']);
   });
 });
