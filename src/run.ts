@@ -206,8 +206,8 @@ function recordRun(run: RunInfo, summary: Summary): Summary {
 type Sealed = {
   /** Files that still hold a value or could not be read, and directories that could not be listed. */
   tainted: ReadonlySet<string>;
-  /** The files that were read and are free of a value; undefined when there was no redactor to check with. */
-  verified: ReadonlySet<string> | undefined;
+  /** The files that were read and are free of a value; empty when there was no redactor to check with. */
+  verified: ReadonlySet<string>;
 };
 
 // A directory that could not be listed counts as one file left out when the zip would have held
@@ -224,7 +224,7 @@ const ZIP_DIRECTORY = /^pass-\d+(?:\/test-results(?:\/|$)|$)/;
 // not measure has nothing to scan and builds no zip.
 function sealRunDirectory(run: RunInfo, deps: RunDeps): Sealed {
   if (!run.measured) {
-    return { tainted: new Set(), verified: undefined };
+    return { tainted: new Set(), verified: new Set() };
   }
   const walk = run.redactor === undefined ? undefined : redactRunDirectory(run.layout.runDir, run.redactor);
   const tainted = [...(walk?.tainted ?? []), ...(walk?.unlisted ?? [])];
@@ -236,7 +236,8 @@ function sealRunDirectory(run: RunInfo, deps: RunDeps): Sealed {
   } else {
     run.warnings.push({ code: 'zip_skipped' });
   }
-  return { tainted: new Set(tainted), verified: walk === undefined ? undefined : new Set(walk.clean) };
+  // Without a redactor nothing was read, so nothing is verified: the zip then takes the fixed files only.
+  return { tainted: new Set(tainted), verified: new Set(walk?.clean ?? []) };
 }
 
 // Builds report_<run id>.zip from the redacted run directory. A zip that fails adds a warning and
@@ -542,8 +543,15 @@ export async function main(argv: readonly string[], deps: RunDeps): Promise<0 | 
   let lock: LockResult;
   try {
     lock = acquireLock(artifactsDir, { now: deps.now, pid: deps.pid, isAlive: deps.isAlive });
-  } catch {
-    return stopWithoutRun('config', `the artifacts directory cannot be created or written: ${artifactsDir}`, deps);
+  } catch (error) {
+    // The cause goes to the log when the directory exists, and its code, which is never a value, to the line.
+    logFailure(path.join(artifactsDir, 'cli-error.log'), error);
+    const code = (error as NodeJS.ErrnoException).code;
+    return stopWithoutRun(
+      'config',
+      `the artifacts directory cannot be created or written${typeof code === 'string' ? ` (${code})` : ''}: ${artifactsDir}`,
+      deps,
+    );
   }
   if (!lock.held) {
     return stopWithoutRun('locked', lockedMessage(path.join(artifactsDir, LOCK_FILE), lock.holder), deps);
@@ -556,12 +564,18 @@ export async function main(argv: readonly string[], deps: RunDeps): Promise<0 | 
   } catch (error) {
     return failInternally(root, error, state.run, deps);
   } finally {
+    // The lock goes first and the rest never skips it: release() does not throw, forgetExit might.
     try {
-      forgetExit();
       lock.release();
     } finally {
-      // After the last line is printed, whichever way the run ended.
-      state.detach?.();
+      try {
+        forgetExit();
+      } catch {
+        // The hook is gone with the process anyway; the outcome of the run is decided.
+      } finally {
+        // After the last line is printed, whichever way the run ended.
+        state.detach?.();
+      }
     }
   }
 }

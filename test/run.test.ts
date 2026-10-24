@@ -124,6 +124,10 @@ function harness(options: {
   accountKnown?: boolean;
   /** With accountKnown: the account the failed checks already knew (the default one when not given). */
   knownAccount?: { login: string; password: string };
+  /** A passing fake check that never calls the onEnv hook, so no redactor is built. */
+  noRedactor?: boolean;
+  /** The function onExit returns, which removes the exit hook, throws. */
+  forgetExitThrows?: boolean;
   /** The platform the run believes it is on; win32 by default, so the zip step runs everywhere. */
   platform?: NodeJS.Platform;
   /** What the fake tar does: write a zip (default), leave a partial zip and exit 1, or write a plain tar and exit 0. */
@@ -176,7 +180,9 @@ function harness(options: {
       options.duringPrechecks?.();
       const result = options.prechecks ?? checked();
       if (result.ok) {
-        hooks?.onEnv?.(result.value.env);
+        if (options.noRedactor !== true) {
+          hooks?.onEnv?.(result.value.env);
+        }
       } else if (options.accountKnown === true) {
         hooks?.onEnv?.(checked('en', 30, options.knownAccount).value.env);
       }
@@ -197,6 +203,9 @@ function harness(options: {
       state.exitRegistrations += 1;
       exitHandlers.add(exitHandler);
       return () => {
+        if (options.forgetExitThrows === true) {
+          throw new Error('the exit hook cannot be removed');
+        }
         state.exitRemovals += 1;
         exitHandlers.delete(exitHandler);
       };
@@ -820,10 +829,27 @@ describe('the run lock', () => {
     assert.equal(code, 3);
     assert.deepEqual(h.lines.slice(-2), ['REASON=config', 'RESULT=FAIL']);
     assert.ok(h.lines.some((line) => line.includes(artifacts(h.root))), h.lines.join('\n'));
+    assert.ok(h.lines.some((line) => /\(E[A-Z]+\)/.test(line)), `the line names no error code: ${h.lines.join('\n')}`);
     assert.equal(fs.readFileSync(artifacts(h.root), 'utf8'), 'not a directory');
     assert.equal(h.prechecksCalls, 0);
     assert.equal(h.passCalls.length, 0);
   });
+});
+
+describe('cleanup at the end of a run never changes its outcome', () => {
+  const cleanPass = (options: PassRunOptions): PassRun => {
+    writePass(options, [project('node-1', 'ok'), project('node-2', 'ok')]);
+    return CLEAN_EXIT;
+  };
+
+  test('an exit hook that cannot be removed still lets the lock go and the redactor detach', async () => {
+    const h = harness({ runPass: cleanPass, prechecks: checked('en', 1), forgetExitThrows: true });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.lines.at(-1), 'RESULT=PASS');
+    assert.equal(fs.existsSync(path.join(artifacts(h.root), '.lock')), false);
+    assert.equal(h.redactorRemoved, 1);
+  });
+
 });
 
 describe('a taken over lock and the interrupt paths', () => {
@@ -1400,6 +1426,20 @@ describe('the zip', () => {
     const names = (h.zipCalls[0] as { args: string[] }).args.slice(7);
     assert.ok(!names.some((name) => name.includes('notes.txt')), names.join('\n'));
     assert.ok(fs.readFileSync(path.join(runDirOf(h.root), 'pass-1', 'test-results', 't', 'notes.txt')).equals(text));
+  });
+
+  test('without a redactor nothing under test-results is verified, so the zip takes the fixed files only', async () => {
+    const h = harness({ runPass: (options) => leaveClean(options), noRedactor: true });
+    assert.equal(await main(['run'], h.deps), 0);
+    assert.equal(h.zipCalls.length, 1);
+    const names = (h.zipCalls[0] as { args: string[] }).args.slice(7);
+    assert.ok(names.includes('report.txt') && names.includes('summary.json'), names.join('\n'));
+    assert.ok(!names.some((name) => name.startsWith('pass-1/test-results/')), names.join('\n'));
+    // The same run with a redactor does pack the screenshot, so the check above can fail.
+    const withRedactor = harness({ runPass: (options) => leaveClean(options) });
+    assert.equal(await main(['run'], withRedactor.deps), 0);
+    const packed = (withRedactor.zipCalls[0] as { args: string[] }).args.slice(7);
+    assert.ok(packed.some((name) => name.startsWith('pass-1/test-results/')), packed.join('\n'));
   });
 
   test('off Windows no file is reported as left out of a zip that is never built', async () => {

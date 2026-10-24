@@ -3,6 +3,7 @@
 // module uses node:fs and node:path only and loads no Playwright module.
 import fs from 'node:fs';
 import path from 'node:path';
+import { removeQuietly } from './quiet.ts';
 
 export const LOCK_FILE = '.lock';
 /**
@@ -88,7 +89,8 @@ function publish(lockFile: string, content: LockContent, deps: LockDeps): boolea
     }
     return createExclusively(lockFile, text);
   } finally {
-    fs.rmSync(temp, { force: true });
+    // The link is already in place or refused; a temporary file held by a scan must not undo that.
+    removeQuietly(temp);
   }
 }
 
@@ -193,10 +195,10 @@ export function acquireLock(artifactsDir: string, deps: LockDeps): LockResult {
       // A file that cannot be read is not shown to be the stale one, so it goes back like a different one.
       if (moved !== verdict.text) {
         giveBack(aside, lockFile, moved, deps);
-        fs.rmSync(aside, { force: true });
+        removeQuietly(aside);
         continue;
       }
-      fs.rmSync(aside, { force: true });
+      removeQuietly(aside);
       takenOver = true;
     }
     if (publish(lockFile, mine(), deps)) {

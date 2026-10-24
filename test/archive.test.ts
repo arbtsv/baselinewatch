@@ -296,6 +296,20 @@ describe('buildZip', () => {
     assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['report_x.zip', 'run']);
   });
 
+  test('a temporary zip that cannot be removed leaves the outcome as it was and the other cleanup still runs', async () => {
+    const s = setup();
+    put(s.runDir, NAME, 'x');
+    let stage: string | undefined;
+    const { run } = fakeRunner((args) => {
+      stage = args[args.indexOf('-C') + 1];
+      // A directory under the temporary name: removing it as a file throws on every platform.
+      fs.mkdirSync(outputOf(args));
+      return { status: 1, timedOut: false };
+    });
+    assert.equal(await buildZip({ ...s, files: [NAME], run, tar: TAR }), 'failed');
+    assert.equal(fs.existsSync(stage as string), false, 'the staged copies were not removed');
+  });
+
   test('a tar that fails leaves no copies behind', async () => {
     const s = setup();
     put(s.runDir, NAME);
@@ -347,6 +361,22 @@ describe('asciiSafeNames', () => {
   });
 });
 
+// Every regular file under a directory (links are not followed), as the verified set of a walk that read all of it.
+function everyFile(root: string, dir: string = root, found: Set<string> = new Set()): Set<string> {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) everyFile(root, full, found);
+    else if (entry.isFile()) found.add(path.relative(root, full).split(path.sep).join('/'));
+  }
+  return found;
+}
+
 describe('zipFileList', () => {
   function makeRun(): string {
     const runDir = makeDir('list');
@@ -365,7 +395,7 @@ describe('zipFileList', () => {
 
   test('lists the report, the summary, the pass files that exist and then the test results, sorted', () => {
     const runDir = makeRun();
-    assert.deepEqual(zipFileList(runDir, new Set()), [
+    assert.deepEqual(zipFileList(runDir, new Set(), everyFile(runDir)), [
       'report.txt',
       'summary.json',
       'pass-1.json',
@@ -380,14 +410,14 @@ describe('zipFileList', () => {
     put(runDir, 'pass-2.json');
     put(runDir, 'pass-2/test-results/u/error-context.md');
     put(runDir, 'pass-2/html/index.html');
-    const list = zipFileList(runDir, new Set());
+    const list = zipFileList(runDir, new Set(), everyFile(runDir));
     assert.deepEqual(list.slice(0, 4), ['report.txt', 'summary.json', 'pass-1.json', 'pass-2.json']);
     assert.ok(list.includes('pass-2/test-results/u/error-context.md'));
     assert.ok(list.indexOf('pass-1/test-results/t/error-context.md') < list.indexOf('pass-2/test-results/u/error-context.md'));
   });
 
   test('never lists html, a stderr log, a history error log or the cli error log', () => {
-    const list = zipFileList(makeRun(), new Set());
+    const list = zipFileList(makeRun(), new Set(), everyFile(makeRun()));
     for (const name of list) {
       assert.ok(!name.includes('/html/'), name);
       assert.ok(!name.endsWith('.stderr.log'), name);
@@ -398,18 +428,18 @@ describe('zipFileList', () => {
 
   test('leaves out a tainted path', () => {
     const runDir = makeRun();
-    const list = zipFileList(runDir, new Set(['pass-1/test-results/t/attachments/screenshot-1.png']));
+    const list = zipFileList(runDir, new Set(['pass-1/test-results/t/attachments/screenshot-1.png']), everyFile(runDir));
     assert.ok(!list.includes('pass-1/test-results/t/attachments/screenshot-1.png'));
     assert.ok(list.includes('pass-1/test-results/t/error-context.md'));
   });
 
   test('leaves out everything under a tainted directory, and everything when the run directory is tainted', () => {
     const runDir = makeRun();
-    const list = zipFileList(runDir, new Set(['pass-1/test-results/t']));
+    const list = zipFileList(runDir, new Set(['pass-1/test-results/t']), everyFile(runDir));
     assert.ok(!list.some((name) => name.startsWith('pass-1/test-results/t/')), list.join('\n'));
     assert.ok(list.includes('pass-1/test-results/.last-run.json'));
     assert.ok(list.includes('report.txt'));
-    assert.deepEqual(zipFileList(runDir, new Set(['.'])), []);
+    assert.deepEqual(zipFileList(runDir, new Set(['.']), everyFile(runDir)), []);
   });
 
   test('takes a file under test-results only when it is verified', () => {
@@ -439,7 +469,7 @@ describe('zipFileList', () => {
 
   test('omits the report and the pass files that do not exist', () => {
     const runDir = makeDir('list-empty');
-    assert.deepEqual(zipFileList(runDir, new Set()), []);
+    assert.deepEqual(zipFileList(runDir, new Set(), everyFile(runDir)), []);
   });
 
   test('does not follow a linked directory', (context) => {
@@ -452,12 +482,12 @@ describe('zipFileList', () => {
       context.skip('links cannot be created here');
       return;
     }
-    const list = zipFileList(runDir, new Set());
+    const list = zipFileList(runDir, new Set(), everyFile(runDir));
     assert.ok(!list.some((name) => name.includes('linked')), list.join('\n'));
   });
 
   test('gives an empty list for a run directory that does not exist', () => {
-    assert.deepEqual(zipFileList(path.join(WORK, 'missing'), new Set()), []);
+    assert.deepEqual(zipFileList(path.join(WORK, 'missing'), new Set(), new Set()), []);
   });
 });
 

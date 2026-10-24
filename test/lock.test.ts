@@ -289,6 +289,34 @@ describe('takeover', () => {
     assert.deepEqual(leftovers(dir), []);
   });
 
+  test('a private temporary file that cannot be removed does not turn a held lock into an error', () => {
+    const dir = freshDir();
+    // The link works; then the temporary name becomes a directory, which removing as a file cannot do.
+    const link = (existing: string, newPath: string): void => {
+      fs.linkSync(existing, newPath);
+      fs.rmSync(existing);
+      fs.mkdirSync(existing);
+    };
+    const lock = acquireLock(dir, { ...deps(4242, aliveOnly(4242)), link });
+    assert.ok(lock.held);
+    assert.equal(readLock(dir).pid, 4242);
+  });
+
+  test('a stale lock whose aside copy cannot be removed is still taken over', () => {
+    const dir = freshDir();
+    leave(dir, { pid: 7777, started_at: startedAgo(MINUTE), run_id: null });
+    const readAside = (file: string): string => {
+      const text = fs.readFileSync(file, 'utf8');
+      fs.rmSync(file);
+      fs.mkdirSync(file);
+      return text;
+    };
+    const lock = acquireLock(dir, { ...deps(4242, aliveOnly(4242)), readAside });
+    assert.ok(lock.held);
+    assert.equal(lock.takenOver, true);
+    assert.equal(readLock(dir).pid, 4242);
+  });
+
   test('without hard links the exclusive create takes a free lock and refuses the next run', () => {
     const noLink = (): void => {
       throw Object.assign(new Error('no hard links here'), { code: 'ENOSYS' });
