@@ -3,11 +3,11 @@
 // Run: node --test test/archive.test.ts
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  asciiSafeNames,
   buildZip,
   commandLineLength,
   isZipCandidate,
@@ -206,27 +206,127 @@ describe('buildZip', () => {
     assert.equal(fs.existsSync(s.tempZip), false);
   });
 
-  test('a command line above the limit with one non-ASCII name is failed and the runner is never called', async () => {
-    const s = setup();
-    const files = longList();
+  // A run of 450 files whose names make a command line above the limit, with real files to copy.
+  function putLongRun(runDir: string): string[] {
+    const files = Array.from({ length: 450 }, (_, index) => `pass-1/test-results/${'a'.repeat(60)}-${index}/error-context.md`);
     files[7] = 'pass-1/test-results/\u043f\u0440\u0438\u0432\u0435\u0442/error-context.md';
-    const { run, calls } = fakeRunner(() => OK);
-    assert.equal(await buildZip({ ...s, files, run, tar: TAR }), 'failed');
-    assert.equal(calls.length, 0);
-    assert.equal(fs.existsSync(s.tempZip), false);
-    assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['run']);
-  });
+    for (const name of files) {
+      put(runDir, name, `text of ${name.length}`);
+    }
+    return files;
+  }
 
-  test('a non-ASCII name under the limit goes through as an argument', async () => {
+  const NAME = 'pass-1/test-results/\u043f\u0440\u0438\u0432\u0435\u0442/error-context.md';
+
+  test('a non-ASCII name is packed from a copy under an ASCII name and the copy is removed', async () => {
     const s = setup();
-    const name = 'pass-1/test-results/\u043f\u0440\u0438\u0432\u0435\u0442/error-context.md';
+    put(s.runDir, 'report.txt', 'the report');
+    put(s.runDir, NAME, 'cyrillic text');
+    let staged: { root: string; names: string[]; texts: string[] } | undefined;
     const { run, calls } = fakeRunner((args) => {
+      const root = args[args.indexOf('-C') + 1] as string;
+      const names = args.slice(args.indexOf('--') + 1);
+      staged = { root, names, texts: names.map((name) => fs.readFileSync(path.join(root, ...name.split('/')), 'utf8')) };
       fs.writeFileSync(outputOf(args), ZIP_MAGIC);
       return OK;
     });
-    assert.equal(await buildZip({ ...s, files: ['report.txt', name], run, tar: TAR }), 'built');
-    assert.ok(calls[0]?.args.includes(name));
+    assert.equal(await buildZip({ ...s, files: ['report.txt', NAME], run, tar: TAR }), 'built');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(staged?.names, ['report.txt', 'pass-1/test-results/_/error-context.md']);
+    assert.deepEqual(staged?.texts, ['the report', 'cyrillic text']);
+    assert.notEqual(path.resolve(staged?.root as string), path.resolve(s.runDir));
     assert.ok(!calls[0]?.args.includes('-T'));
+    assert.equal(fs.existsSync(staged?.root as string), false);
+    assert.equal(fs.existsSync(s.tempZip), false);
+    assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['report_x.zip', 'run']);
+    assert.equal(fs.readFileSync(path.join(s.runDir, ...NAME.split('/')), 'utf8'), 'cyrillic text');
+  });
+
+  test('ASCII names are packed from the run directory itself, with nothing copied', async () => {
+    const s = setup();
+    put(s.runDir, 'report.txt', 'the report');
+    const { run, calls } = fakeRunner((args) => {
+      assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['run']);
+      fs.writeFileSync(outputOf(args), ZIP_MAGIC);
+      return OK;
+    });
+    assert.equal(await buildZip({ ...s, files: ['report.txt'], run, tar: TAR }), 'built');
+    assert.equal(calls[0]?.args[calls[0].args.indexOf('-C') + 1], s.runDir);
+  });
+
+  test('a command line above the limit with a non-ASCII name uses a list file of ASCII names and removes it and the copies', async () => {
+    const s = setup();
+    const files = putLongRun(s.runDir);
+    let listText: string | undefined;
+    let listFile: string | undefined;
+    let root: string | undefined;
+    const { run, calls } = fakeRunner((args) => {
+      listFile = args[args.indexOf('-T') + 1];
+      listText = fs.readFileSync(listFile as string, 'utf8');
+      root = args[args.indexOf('-C') + 1];
+      for (const name of listText.split('\n')) {
+        assert.ok(fs.existsSync(path.join(root as string, ...name.split('/'))), `${name} is not in the staging directory`);
+      }
+      fs.writeFileSync(outputOf(args), ZIP_MAGIC);
+      return OK;
+    });
+    assert.equal(await buildZip({ ...s, files, run, tar: TAR }), 'built');
+    assert.equal(calls.length, 1);
+    assert.ok((listText as string).split('\n').every((name) => /^[\x20-\x7e]+$/.test(name)));
+    assert.equal((listText as string).split('\n')[7], 'pass-1/test-results/_/error-context.md');
+    assert.equal(fs.existsSync(listFile as string), false);
+    assert.equal(fs.existsSync(root as string), false);
+    assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['report_x.zip', 'run']);
+  });
+
+  test('a tar that fails leaves no copies behind', async () => {
+    const s = setup();
+    put(s.runDir, NAME);
+    const { run } = fakeRunner(() => ({ status: 1, timedOut: false }));
+    assert.equal(await buildZip({ ...s, files: [NAME], run, tar: TAR }), 'failed');
+    assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['run']);
+  });
+
+  test('a missing file with a non-ASCII name is failed, the runner is never called and no copies are left', async () => {
+    const s = setup();
+    const { run, calls } = fakeRunner(() => OK);
+    assert.equal(await buildZip({ ...s, files: [NAME], run, tar: TAR }), 'failed');
+    assert.equal(calls.length, 0);
+    assert.deepEqual(fs.readdirSync(s.listDir).sort(), ['run']);
+  });
+});
+
+describe('asciiSafeNames', () => {
+  const CYR = '\u043f\u0440\u0438\u0432\u0435\u0442';
+
+  test('leaves ASCII names as they are', () => {
+    const files = ['report.txt', 'pass-1/test-results/a b/c.png', 'pass-1.json'];
+    assert.deepEqual(asciiSafeNames(files), files);
+  });
+
+  test('turns a run of characters outside printable ASCII into one underscore, in directories and in file names', () => {
+    assert.deepEqual(
+      asciiSafeNames([`pass-1/test-results/a-${CYR}-b/c.txt`, `pass-1/test-results/${CYR}${CYR}/${CYR}.png`, 'x/\u{1f600}\u{1f600}.md', 'tab\there.txt']),
+      ['pass-1/test-results/a-_-b/c.txt', 'pass-1/test-results/_/_.png', 'x/_.md', 'tab_here.txt'],
+    );
+  });
+
+  test('gives two different non-ASCII directories different names and the same directory the same name', () => {
+    const names = asciiSafeNames([`t/${CYR}/a.md`, `t/\u043f\u043e\u043a\u0430/a.md`, `t/${CYR}/b.md`, `t/\u043f\u043e\u043a\u0430/b.md`]);
+    assert.deepEqual(names, ['t/_/a.md', 't/_-2/a.md', 't/_/b.md', 't/_-2/b.md']);
+  });
+
+  test('never renames an ASCII sibling for the sake of a non-ASCII one, in either order', () => {
+    assert.deepEqual(asciiSafeNames([`t/${CYR}/a.md`, 't/_/a.md']), ['t/_-2/a.md', 't/_/a.md']);
+    assert.deepEqual(asciiSafeNames(['t/_/a.md', `t/${CYR}/a.md`]), ['t/_/a.md', 't/_-2/a.md']);
+  });
+
+  test('puts the counter of a clashing file name before its extension and compares names without case', () => {
+    assert.deepEqual(asciiSafeNames([`d/${CYR}.txt`, 'd/\u043f\u043e\u043a\u0430.txt', 'd/_-2.txt', 'D/x']), ['d/_.txt', 'd/_-3.txt', 'd/_-2.txt', 'D/x']);
+  });
+
+  test('the names of a directory that was renamed carry through to its children', () => {
+    assert.deepEqual(asciiSafeNames([`${CYR}/sub/a.txt`, `${CYR}/sub/b.txt`, '\u043f\u043e\u043a\u0430/sub/a.txt']), ['_/sub/a.txt', '_/sub/b.txt', '_-2/sub/a.txt']);
   });
 });
 
@@ -328,24 +428,6 @@ describe('isZipCandidate', () => {
   });
 });
 
-// Temporary: what the real tar.exe says when the zip is not built, and the code pages of the machine.
-function tarDiagnostics(dir: string, runDir: string, files: string[]): string {
-  const probe = path.join(dir, 'probe.zip');
-  const tar = spawnSync(tarPath(), tarArgs(probe, runDir, files), { windowsHide: true });
-  const version = spawnSync(tarPath(), ['--version'], { encoding: 'utf8', windowsHide: true });
-  const pages = spawnSync('reg', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage', '/v', 'ACP', '/v', 'OEMCP'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  return [
-    `tar status=${tar.status} error=${tar.error?.message ?? '-'} zip written=${fs.existsSync(probe)}`,
-    `tar stderr (latin1)=${tar.stderr?.toString('latin1').trim()}`,
-    `tar stderr (hex)=${tar.stderr?.subarray(0, 200).toString('hex')}`,
-    `tar version=${version.stdout?.trim()}`,
-    `code pages=${pages.stdout?.replace(/\s+/g, ' ').trim()}`,
-  ].join('\n');
-}
-
 // The real tar.exe of Windows (bsdtar): the format, the order of the entries and the failure of a missing input.
 describe('the real tar.exe', { skip: process.platform !== 'win32' }, () => {
   const CYRILLIC = '\u043f\u0440\u0438\u0432\u0435\u0442';
@@ -359,8 +441,7 @@ describe('the real tar.exe', { skip: process.platform !== 'win32' }, () => {
     const files = ['report.txt', 'pass-1/test-results/a.txt', `pass-1/test-results/${CYRILLIC}/b.txt`];
     const tempZip = path.join(dir, '.report_x.1.tmp.zip');
     const finalZip = path.join(dir, 'report_x.zip');
-    const built = await buildZip({ runDir, tempZip, finalZip, files, run: runTar, tar: tarPath() });
-    assert.equal(built, 'built', built === 'built' ? undefined : tarDiagnostics(dir, runDir, files));
+    assert.equal(await buildZip({ runDir, tempZip, finalZip, files, run: runTar, tar: tarPath() }), 'built');
     const entries = unzipTexts(fs.readFileSync(finalZip));
     assert.deepEqual(
       entries.map(([, text]) => text),
@@ -370,6 +451,8 @@ describe('the real tar.exe', { skip: process.platform !== 'win32' }, () => {
       entries.slice(0, 2).map(([name]) => name),
       ['report.txt', 'pass-1/test-results/a.txt'],
     );
+    // The Cyrillic directory is packed under an ASCII name, so tar never has to read it.
+    assert.equal(entries[2]?.[0], 'pass-1/test-results/_/b.txt');
     assert.equal(fs.existsSync(tempZip), false);
   });
 

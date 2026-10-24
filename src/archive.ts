@@ -15,6 +15,7 @@ export const TAR_TIMEOUT_MS = 60_000;
 const ZIP_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 const LIST_FILE = 'files.txt';
 const LIST_DIR_PREFIX = 'blw-zip-';
+const STAGE_DIR_PREFIX = '.blw-stage-';
 
 /** System32\tar.exe by its full path, never through PATH or the working directory. */
 export function tarPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -76,26 +77,100 @@ export const runTar: TarRunner = (file, args) =>
 
 export type ZipOutcome = 'built' | 'failed';
 
-// Printable ASCII only: a -T list file is read in the ANSI code page, which loses any other name.
-const ASCII_NAME = /^[\u0020-\u007e]+$/;
+// Printable ASCII only. tar reads the names of its command line and of a -T list file in the ANSI code
+// page of the machine, so a character outside that page arrives as '?' and the file is not found.
+const ASCII_NAME = /^[\x20-\x7e]+$/;
+const NON_ASCII_RUN = /[^\x20-\x7e]+/gu;
+
+// "name.ext" with a counter before the extension: "name-2.ext".
+function withCounter(name: string, counter: number): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? `${name.slice(0, dot)}-${counter}${name.slice(dot)}` : `${name}-${counter}`;
+}
+
+/**
+ * An ASCII-only twin for every path (relative, written with '/'), in the same order. A run of
+ * characters outside printable ASCII becomes one '_'. Every distinct directory and file keeps a name of
+ * its own among its siblings: a clash gets a counter ("_-2"), and a name that is ASCII already is never
+ * renamed for the sake of another one, so two tests whose titles differ only in non-ASCII characters do
+ * not merge their folders.
+ */
+export function asciiSafeNames(files: readonly string[]): string[] {
+  const split = files.map((file) => file.split('/'));
+  const safeOf = new Map<string, string>();
+  const depth = Math.max(0, ...split.map((segments) => segments.length));
+  for (let level = 1; level <= depth; level += 1) {
+    const children = new Map<string, Map<string, string>>(); // safe parent -> original prefix -> its last segment
+    for (const segments of split) {
+      if (segments.length < level) {
+        continue;
+      }
+      const original = segments.slice(0, level).join('/');
+      const parent = level === 1 ? '' : (safeOf.get(segments.slice(0, level - 1).join('/')) as string);
+      const group = children.get(parent) ?? new Map<string, string>();
+      group.set(original, segments[level - 1] as string);
+      children.set(parent, group);
+    }
+    for (const [parent, group] of children) {
+      const used = new Set<string>();
+      for (const [original, segment] of group) {
+        if (ASCII_NAME.test(segment)) {
+          used.add(segment.toLowerCase());
+          safeOf.set(original, parent === '' ? segment : `${parent}/${segment}`);
+        }
+      }
+      for (const [original, segment] of group) {
+        if (ASCII_NAME.test(segment)) {
+          continue;
+        }
+        const base = segment.replace(NON_ASCII_RUN, '_');
+        let name = base;
+        for (let counter = 2; used.has(name.toLowerCase()); counter += 1) {
+          name = withCounter(base, counter);
+        }
+        used.add(name.toLowerCase());
+        safeOf.set(original, parent === '' ? name : `${parent}/${name}`);
+      }
+    }
+  }
+  return split.map((segments) => safeOf.get(segments.join('/')) as string);
+}
+
+// The names tar gets: the files of runDir as they are, or, when a name is not ASCII, copies under
+// ASCII-only names in a directory next to the temporary zip (made.stageDir).
+function stagedNames(
+  options: { runDir: string; tempZip: string; files: readonly string[] },
+  made: { stageDir?: string },
+): { root: string; files: readonly string[] } {
+  if (options.files.every((name) => ASCII_NAME.test(name))) {
+    return { root: options.runDir, files: options.files };
+  }
+  const stageDir = fs.mkdtempSync(path.join(path.dirname(options.tempZip), STAGE_DIR_PREFIX));
+  made.stageDir = stageDir;
+  const safe = asciiSafeNames(options.files);
+  options.files.forEach((name, index) => {
+    const target = path.join(stageDir, ...(safe[index] as string).split('/'));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(options.runDir, ...name.split('/')), target);
+  });
+  return { root: stageDir, files: safe };
+}
 
 // The arguments of the call: the file names as arguments, or in a list file when the line is too long.
-// Undefined when the line is too long and a name is not ASCII.
+// Every name is ASCII here, so the list file loses nothing.
 function callArguments(
-  options: { runDir: string; tempZip: string; files: readonly string[]; tar: string; listDir?: string },
+  options: { tempZip: string; tar: string; listDir?: string },
+  names: { root: string; files: readonly string[] },
   made: { listDir?: string },
-): string[] | undefined {
-  const args = tarArgs(options.tempZip, options.runDir, options.files);
+): string[] {
+  const args = tarArgs(options.tempZip, names.root, names.files);
   if (commandLineLength(options.tar, args) <= MAX_COMMAND_LINE) {
     return args;
   }
-  if (!options.files.every((name) => ASCII_NAME.test(name))) {
-    return undefined;
-  }
   made.listDir = fs.mkdtempSync(path.join(options.listDir ?? os.tmpdir(), LIST_DIR_PREFIX));
   const listFile = path.join(made.listDir, LIST_FILE);
-  fs.writeFileSync(listFile, options.files.join('\n'), 'utf8');
-  return ['-a', '-c', '-f', options.tempZip, '-C', options.runDir, '-T', listFile];
+  fs.writeFileSync(listFile, names.files.join('\n'), 'utf8');
+  return ['-a', '-c', '-f', options.tempZip, '-C', names.root, '-T', listFile];
 }
 
 function startsWithSignature(file: string): boolean {
@@ -113,8 +188,9 @@ function startsWithSignature(file: string): boolean {
  * Archives the files (paths relative to runDir, written with '/') into finalZip through the temporary
  * name tempZip, which must end in .zip. Anything short of a finished zip, whether a tar that failed,
  * timed out or could not start, a missing file or an archive without the zip signature, removes the
- * temporary file and the list file and gives 'failed'. A command line too long for the name list is
- * 'failed' as well, unless every name is ASCII, when a list file outside runDir carries the names.
+ * temporary file, the list file and the staged copies and gives 'failed'. A command line too long for
+ * the name list moves the names into a list file outside runDir. A name that is not ASCII cannot be
+ * read by tar on every machine, so the files are then packed from copies under ASCII-only names.
  */
 export async function buildZip(options: {
   runDir: string;
@@ -126,12 +202,9 @@ export async function buildZip(options: {
   /** Where the list file for a long command line is made; the system temporary directory by default. */
   listDir?: string;
 }): Promise<ZipOutcome> {
-  const made: { listDir?: string } = {};
+  const made: { listDir?: string; stageDir?: string } = {};
   try {
-    const args = callArguments(options, made);
-    if (args === undefined) {
-      return 'failed';
-    }
+    const args = callArguments(options, stagedNames(options, made), made);
     const result = await options.run(options.tar, args);
     if (result.status !== 0 || result.timedOut || result.error !== undefined) {
       return 'failed';
@@ -145,8 +218,10 @@ export async function buildZip(options: {
     return 'failed';
   } finally {
     fs.rmSync(options.tempZip, { force: true });
-    if (made.listDir !== undefined) {
-      fs.rmSync(made.listDir, { recursive: true, force: true });
+    for (const dir of [made.listDir, made.stageDir]) {
+      if (dir !== undefined) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   }
 }
