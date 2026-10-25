@@ -53,8 +53,8 @@ export const ru: Catalog = {
         return 'Не удалось создать zip; файлы запуска остались в каталоге запуска.';
       case 'launcher_outdated':
         return warning.found === undefined
-          ? `В запускающем файле monitor.bat нет версии шаблона, которую ядро может прочитать (ожидается ${warning.expected ?? '?'}); выполните blw init --refresh, чтобы обновить его.`
-          : `Запускающий файл monitor.bat имеет версию шаблона ${warning.found}, а ядро ожидает более новую, ${warning.expected ?? '?'}; выполните blw init --refresh, чтобы обновить его.`;
+          ? `В запускающем файле monitor.bat нет версии шаблона, которую ядро может прочитать (ожидается ${warning.expected ?? '?'}); выполните npx blw init --refresh, чтобы обновить его.`
+          : `Запускающий файл monitor.bat имеет версию шаблона ${warning.found}, а ядро ожидает более новую, ${warning.expected ?? '?'}; выполните npx blw init --refresh, чтобы обновить его.`;
     }
   },
   resultLine: (result, reason) => (reason === null ? `Результат: ${result}` : `Результат: ${result} (${reason})`),

@@ -136,10 +136,10 @@ describe('the launcher warning', () => {
 
   test('the English sentence names the numbers, the launcher and the command', () => {
     const [withFound, withoutFound] = FORMS.map((form) => en.warning(form)) as [string, string];
-    for (const needle of ['0', '1', 'monitor.bat', 'blw init --refresh']) {
+    for (const needle of ['0', '1', 'monitor.bat', 'npx blw init --refresh']) {
       assert.ok(withFound.includes(needle), `${needle}: ${withFound}`);
     }
-    for (const needle of ['1', 'monitor.bat', 'blw init --refresh']) {
+    for (const needle of ['1', 'monitor.bat', 'npx blw init --refresh']) {
       assert.ok(withoutFound.includes(needle), `${needle}: ${withoutFound}`);
     }
     assert.ok(!withoutFound.includes('undefined'), withoutFound);
@@ -150,7 +150,7 @@ describe('the launcher warning', () => {
       const text = ru.warning(form);
       assert.match(text, CYRILLIC);
       assert.ok(text.includes('monitor.bat'), text);
-      assert.ok(text.includes('blw init --refresh'), text);
+      assert.ok(text.includes('npx blw init --refresh'), text);
       assert.ok(!text.includes('undefined'), text);
     }
   });
