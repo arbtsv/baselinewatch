@@ -22,7 +22,7 @@ import { TEMPLATE_VERSION } from '../src/template-version.ts';
 const TEMPLATE_RECORD = {
   version: 1,
   sha256: {
-    'monitor.bat': '2d54ac3845ae51a09d47a998220020fdbd4eda46534f097c9b1bfd93745a8cb6',
+    'monitor.bat': 'c3825a48baffeda7b3c37384962b87eda7583a3eac4aa0771a9307dcfa556a30',
     gitignore: '0be9e1c74e339972ba35aa2712b29955e2e354c742c5d67ae451e7eb265e37c5',
   },
 } as const;

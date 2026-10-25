@@ -187,6 +187,35 @@ describe('running monitor.bat', { skip: process.platform !== 'win32' }, () => {
     assert.deepEqual(result.lines.slice(-2), ['REASON=node', 'RESULT=FAIL']);
   });
 
+  // A version manager can put a node.cmd in front of Node. cmd.exe hands the rest of the script to a batch
+  // file it starts without call, so the probe must use call or the launcher ends there with the exit code 0.
+  test('a node.cmd shim on the Path still runs the core and passes its exit code and output through', () => {
+    const { dir, bat } = makeProject('shim-runs', { core: false });
+    const cli = path.join(dir, 'node_modules', 'baselinewatch', 'dist', 'cli.js');
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    fs.writeFileSync(cli, "console.log('CORE-RAN');\nprocess.exitCode = 1;\n");
+    const shims = path.join(dir, 'shims');
+    fs.mkdirSync(shims);
+    fs.writeFileSync(path.join(shims, 'node.cmd'), `@"${process.execPath}" %*\r\n`);
+    const result = runLauncherSync(bat, [], { env: envWithPath(`${shims};${systemDirectory()}`), cwd: os.tmpdir() });
+    assert.equal(result.status, 1, result.stdout);
+    assert.ok(result.lines.includes('CORE-RAN'), result.stdout);
+  });
+
+  test('a node.cmd shim whose version call fails gives REASON=node and exit 3', () => {
+    const { dir, bat } = makeProject('shim-broken');
+    const shims = path.join(dir, 'shims');
+    fs.mkdirSync(shims);
+    fs.writeFileSync(path.join(shims, 'node.cmd'), '@exit /b 9\r\n');
+    const result = runLauncherSync(bat, [], { env: envWithPath(`${shims};${systemDirectory()}`), cwd: os.tmpdir() });
+    assert.equal(result.status, 3, result.stdout);
+    assert.deepEqual(result.lines.slice(-2), ['REASON=node', 'RESULT=FAIL']);
+    assert.equal(
+      result.lines.some((line) => line.startsWith('ARGS=')),
+      false,
+    );
+  });
+
   test('works from a directory name full of characters cmd.exe treats as syntax', () => {
     const name = `blw (x) & y ^ 100% ${String.fromCodePoint(0x0434, 0x0435, 0x043c, 0x043e)}`;
     const { bat } = makeProject(name);

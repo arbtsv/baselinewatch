@@ -6,7 +6,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 set "NODE=node"
 if exist "%~dp0node\node.exe" set "NODE=%~dp0node\node.exe"
-"%NODE%" --version >nul 2>&1
+call "%NODE%" --version >nul 2>&1
 if errorlevel 1 goto nonode
 if not exist "node_modules\baselinewatch\dist\cli.js" goto nocore
 "%NODE%" "node_modules\baselinewatch\dist\cli.js" run %*
