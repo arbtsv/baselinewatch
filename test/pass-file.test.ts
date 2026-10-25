@@ -67,6 +67,33 @@ describe('pass file on disk', () => {
     );
   });
 
+  test('a stale temp name, a link included, is replaced and never written through', () => {
+    const dir = path.join(WORK, 'stale-temp');
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, 'launcher.bin');
+    const temp = `${target}.${process.pid}.tmp`;
+    const outside = path.join(dir, 'outside.txt');
+    fs.writeFileSync(outside, 'outside');
+    let linked = true;
+    try {
+      fs.symlinkSync(outside, temp, 'file');
+    } catch {
+      // A symbolic link needs a privilege on some systems; a hard link writes through just the same.
+      try {
+        fs.linkSync(outside, temp);
+      } catch {
+        linked = false;
+        fs.writeFileSync(temp, 'stale');
+      }
+    }
+    const bytes = Buffer.from([0x40, 0x0d, 0x0a, 0xff]);
+    writeFileAtomic(target, bytes);
+    assert.ok(fs.readFileSync(target).equals(bytes));
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'outside', linked ? 'the link target keeps its bytes' : 'untouched');
+    assert.equal(fs.existsSync(temp), false, 'no temp file is left');
+    assert.ok(fs.lstatSync(target).isFile());
+  });
+
   test('an absent file reads as missing', () => {
     assert.deepEqual(readPassFile(path.join(WORK, 'nothing-here.json'), EXPECT), { state: 'missing' });
   });
