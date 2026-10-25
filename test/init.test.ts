@@ -371,6 +371,28 @@ describe('rollback', () => {
     assert.deepEqual(fs.readdirSync(dir), []);
   });
 
+  test('a created file that cannot be removed is named and the message does not claim a clean state', () => {
+    const dir = freshDir('rollback-stuck');
+    const first = path.join(dir, ...(MANIFEST_TARGETS[0] as string).split('/'));
+    const result = initInto(dir, {
+      // Before the fourth write fails, the first created file is swapped for a folder with a file in it;
+      // removing a folder with rmSync and no recursive option fails on every OS.
+      writeFile: failingOn(4, () => {
+        fs.rmSync(first);
+        fs.mkdirSync(first);
+        fs.writeFileSync(path.join(first, 'held.txt'), 'held');
+        denied();
+      }),
+    });
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    const text = result.lines.join('\n');
+    assert.ok(text.includes('EACCES'), text);
+    assert.ok(text.includes(`could not be removed: ${MANIFEST_TARGETS[0]}.`), text);
+    assert.doesNotMatch(text, /were removed/);
+    assert.equal(fs.existsSync(path.join(first, 'held.txt')), true);
+    assert.equal(fs.existsSync(path.join(dir, ...(MANIFEST_TARGETS[1] as string).split('/'))), false, 'the other files are removed');
+  });
+
   test('a file that somebody else created after the check keeps its bytes (EEXIST)', () => {
     const dir = freshDir('rollback-race');
     const result = initInto(dir, {

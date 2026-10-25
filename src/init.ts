@@ -328,11 +328,13 @@ export function runInit(args: { dir: string | undefined; refresh: boolean }, dep
   } catch (error) {
     // Only what this run made goes: the files first, then its directories from the deepest up, and a
     // directory that somebody else has filled meanwhile stays.
+    const leftovers: string[] = [];
     for (const file of madeFiles.reverse()) {
       try {
-        fs.rmSync(file, { force: true });
+        fs.rmSync(file, { force: true, maxRetries: 3, retryDelay: 100 });
       } catch {
-        // A file that cannot be removed stays; the line below still reports the failure.
+        // A file that cannot be removed stays and is named in the line below.
+        leftovers.push(path.relative(dir, file).split(path.sep).join('/'));
       }
     }
     for (const made of madeDirs.reverse()) {
@@ -342,7 +344,12 @@ export function runInit(args: { dir: string | undefined; refresh: boolean }, dep
         // Not empty, or already gone.
       }
     }
-    deps.print(`blw init: writing ${writing} failed (${reason(error)}). The files this run created were removed.`);
+    const failed = `blw init: writing ${writing} failed (${reason(error)}).`;
+    deps.print(
+      leftovers.length === 0
+        ? `${failed} The files this run created were removed.`
+        : `${failed} These files this run created could not be removed: ${leftovers.reverse().join(', ')}.`,
+    );
     return 1;
   }
 
