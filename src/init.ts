@@ -127,6 +127,28 @@ function createFile(file: string, bytes: Uint8Array): void {
   }
 }
 
+/**
+ * Creates a missing directory and the missing ones above it, and appends each one it made to made. It stops
+ * at the root of the path: a root that does not exist (a drive letter that is not there) ends in an error
+ * with a plain message, not in an endless climb. The operations are a seam for the tests.
+ */
+export function makeMissingDirectories(
+  target: string,
+  made: string[],
+  ops: { kindOf: (target: string) => Kind; mkdir: (target: string) => void } = { kindOf, mkdir: (dir) => void fs.mkdirSync(dir) },
+): void {
+  if (ops.kindOf(target) !== 'missing') {
+    return;
+  }
+  const parent = path.dirname(target);
+  if (parent === target) {
+    throw new Error('the root of the path does not exist');
+  }
+  makeMissingDirectories(parent, made, ops);
+  ops.mkdir(target);
+  made.push(target);
+}
+
 // Every path that init would create and that is already taken, relative, once each, in manifest order.
 function findConflicts(dir: string, targets: readonly string[]): string[] {
   const conflicts = new Set<string>();
@@ -287,14 +309,8 @@ export function runInit(args: { dir: string | undefined; refresh: boolean }, dep
   const madeFiles: string[] = [];
   const madeDirs: string[] = [];
   let writing = 'the target directory';
-  // Creates a missing directory and the missing ones above it, and remembers each one it made.
   const makeDirectory = (target: string): void => {
-    if (kindOf(target) !== 'missing') {
-      return;
-    }
-    makeDirectory(path.dirname(target));
-    fs.mkdirSync(target);
-    madeDirs.push(target);
+    makeMissingDirectories(target, madeDirs);
   };
   try {
     makeDirectory(dir);

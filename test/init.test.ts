@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { USAGE_LINES } from '../src/args.ts';
-import { renderTemplate, runInit, TEMPLATE_FILES, VERSION_TOKEN, type InitDeps } from '../src/init.ts';
+import { makeMissingDirectories, renderTemplate, runInit, TEMPLATE_FILES, VERSION_TOKEN, type InitDeps } from '../src/init.ts';
 import { writeFileAtomic } from '../src/pass-file.ts';
 import { main, type RunDeps } from '../src/run.ts';
 import { TEMPLATE_VERSION } from '../src/template-version.ts';
@@ -383,6 +383,52 @@ describe('rollback', () => {
     assert.ok(result.lines.some((line) => line.includes('env.example.json') && line.includes('EEXIST')), result.lines.join('\n'));
     assert.deepEqual(fs.readdirSync(dir), ['env.example.json']);
     assert.equal(fs.readFileSync(path.join(dir, 'env.example.json'), 'utf8'), 'the other writer');
+  });
+});
+
+describe('a target whose root does not exist', () => {
+  test('creating the directories stops at the root with a plain error', () => {
+    const asked: string[] = [];
+    const made: string[] = [];
+    const target = path.join(path.parse(WORK).root, 'no', 'such', 'root');
+    assert.throws(
+      () =>
+        makeMissingDirectories(target, made, {
+          kindOf: (candidate) => {
+            asked.push(candidate);
+            return 'missing';
+          },
+          mkdir: refuse('create a directory'),
+        }),
+      (error: Error) => error.message === 'the root of the path does not exist' && !(error instanceof RangeError),
+    );
+    assert.deepEqual(made, []);
+    assert.equal(asked.at(-1), path.parse(WORK).root);
+    assert.ok(asked.length <= 4, asked.join(' '));
+  });
+
+  test('directories made before the root is reached are not reported as made', () => {
+    const made: string[] = [];
+    const root = path.parse(WORK).root;
+    const present = new Set<string>([root]);
+    const mkdir = (dir: string): void => {
+      present.add(dir);
+    };
+    makeMissingDirectories(path.join(root, 'a', 'b'), made, {
+      kindOf: (candidate) => (present.has(candidate) ? 'directory' : 'missing'),
+      mkdir,
+    });
+    assert.deepEqual(made, [path.join(root, 'a'), path.join(root, 'a', 'b')]);
+  });
+
+  test('init into a drive that does not exist fails with one plain line and no stack overflow', { skip: process.platform !== 'win32' }, () => {
+    const letter = [...'QRSTUVWXYZ'].find((candidate) => !fs.existsSync(`${candidate}:\\`));
+    assert.ok(letter !== undefined, 'a free drive letter');
+    const result = initInto(`${letter}:\\nonexistent-drive\\x`);
+    assert.equal(result.code, 1, result.lines.join('\n'));
+    const text = result.lines.join('\n');
+    assert.match(text, /the root of the path does not exist/);
+    assert.doesNotMatch(text, /call stack/i);
   });
 });
 
