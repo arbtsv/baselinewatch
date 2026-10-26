@@ -1,0 +1,4 @@
+env.json
+artifacts/
+node/
+node_modules/

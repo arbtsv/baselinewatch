@@ -40,6 +40,8 @@ const deps: RunDeps = {
   isAlive: processIsAlive,
   platform: process.platform,
   zip: runTar,
+  // npx keeps the directory the caller typed the command in, which is where init writes by default.
+  cwd: () => process.cwd(),
   // The lines relayed from the Playwright child go through the same print() as the lines of this
   // command, so one sink in front of the console covers both.
   attachRedactor: (redact) => {

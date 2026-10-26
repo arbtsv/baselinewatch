@@ -4,6 +4,11 @@
 .githooks/* text eol=lf
 *.sh text eol=lf
 
+# The templates and the demo project are copied byte for byte by blw init, so they keep LF on every
+# platform; the batch rules below still win for their .bat files (the last matching rule wins)
+templates/** text eol=lf
+examples/demo-portal/** text eol=lf
+
 # Windows batch files need CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

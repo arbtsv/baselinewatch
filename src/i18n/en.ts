@@ -47,6 +47,10 @@ export const en: Catalog = {
         return 'The zip was not built: it is made on Windows only.';
       case 'zip_failed':
         return 'The zip could not be built; the run files are in the run directory.';
+      case 'launcher_outdated':
+        return warning.found === undefined
+          ? `The launcher monitor.bat carries no template version that this core can read (expected ${warning.expected ?? '?'}); run npx blw init --refresh to update it.`
+          : `The launcher monitor.bat has template version ${warning.found}, older than ${warning.expected ?? '?'} that this core expects; run npx blw init --refresh to update it.`;
     }
   },
   resultLine: (result, reason) => (reason === null ? `Result: ${result}` : `Result: ${result} (${reason})`),

@@ -56,12 +56,18 @@ export function passFileText(file: PassFile): string {
   return JSON.stringify(file, null, 2) + '\n';
 }
 
-/** Writes through a temp file in the same directory and renames it over the target. */
-export function writeFileAtomic(file: string, text: string): void {
+/**
+ * Writes through a temp file in the same directory and renames it over the target. A string is written
+ * as UTF-8 and bytes are written unchanged, so a reader sees either the old content or the new one.
+ */
+export function writeFileAtomic(file: string, data: string | Uint8Array): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
+  // A leftover of an earlier run, or a link that somebody put at this name, is removed (a link itself, never
+  // its target) and the temp file is then created exclusively, so the bytes never go through a link.
+  fs.rmSync(temp, { force: true });
   try {
-    fs.writeFileSync(temp, text, 'utf8');
+    fs.writeFileSync(temp, data, { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(temp, file);
   } catch (error) {
     fs.rmSync(temp, { force: true });

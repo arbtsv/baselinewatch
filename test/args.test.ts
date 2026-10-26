@@ -1,4 +1,4 @@
-// Tests for src/args.ts: blw run accepts only run, --help and --version.
+// Tests for src/args.ts: blw accepts the commands run and init and the options --help and --version.
 // Run: node --test test/args.test.ts
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,9 +32,39 @@ describe('parseRunArgs', () => {
     assert.deepEqual(parseRunArgs(['-h', '--bogus']), { kind: 'help' });
   });
 
+  test('run --refresh is a usage problem that names the option', () => {
+    const parsed = parseRunArgs(['run', '--refresh']);
+    assert.equal(parsed.kind, 'usage');
+    assert.ok(parsed.kind === 'usage' && parsed.problem.includes('--refresh'), 'the problem names --refresh');
+  });
+
+  test('a value on init --refresh is an init usage problem that names the option but not the value', () => {
+    const parsed = parseRunArgs(['init', '--refresh=secret-looking-value']);
+    assert.equal(parsed.kind, 'init_usage');
+    const problem = parsed.kind === 'init_usage' ? parsed.problem : '';
+    assert.ok(problem.includes('--refresh'), problem);
+    assert.equal(problem.includes('secret-looking-value'), false, problem);
+  });
+
+  test('init alone writes into the current directory', () => {
+    assert.deepEqual(parseRunArgs(['init']), { kind: 'init', dir: undefined, refresh: false });
+  });
+
+  test('init takes one directory', () => {
+    assert.deepEqual(parseRunArgs(['init', 'monitoring']), { kind: 'init', dir: 'monitoring', refresh: false });
+  });
+
+  test('init --refresh refreshes the current directory', () => {
+    assert.deepEqual(parseRunArgs(['init', '--refresh']), { kind: 'init', dir: undefined, refresh: true });
+  });
+
+  test('init with a directory and --refresh refreshes that directory', () => {
+    assert.deepEqual(parseRunArgs(['init', 'proj', '--refresh']), { kind: 'init', dir: 'proj', refresh: true });
+    assert.deepEqual(parseRunArgs(['init', '--refresh', 'proj']), { kind: 'init', dir: 'proj', refresh: true });
+  });
+
   const REJECTED: Array<[string, string[]]> = [
     ['no argument', []],
-    ['init', ['init']],
     ['another command', ['report']],
     ['an unknown option', ['run', '--bogus']],
     ['a Playwright option', ['run', '--retries=1']],
@@ -79,7 +109,56 @@ describe('parseRunArgs', () => {
   });
 });
 
+describe('parseRunArgs for init', () => {
+  const PROBLEMS: Array<[string, string[]]> = [
+    ['a second positional', ['init', 'a', 'b']],
+    ['an empty directory argument', ['init', '']],
+    ['--version', ['init', '--version']],
+    ['the short option -h', ['init', '-h']],
+    ['an unknown option', ['init', '--bogus']],
+    ['a value on --help', ['init', '--help=yes']],
+  ];
+
+  for (const [name, argv] of PROBLEMS) {
+    test(`init with ${name} is an init usage problem in plain English`, () => {
+      const parsed = parseRunArgs(argv);
+      assert.equal(parsed.kind, 'init_usage');
+      const problem = parsed.kind === 'init_usage' ? parsed.problem : '';
+      assert.ok(problem.length > 0);
+      assert.match(problem, /^[\x20-\x7e]+$/, 'plain printable English');
+    });
+  }
+
+  test('init names an unknown option but not its value', () => {
+    const parsed = parseRunArgs(['init', '--bogus=secret-looking-value']);
+    assert.equal(parsed.kind, 'init_usage');
+    const problem = parsed.kind === 'init_usage' ? parsed.problem : '';
+    assert.ok(problem.includes('--bogus'), problem);
+    assert.equal(problem.includes('secret-looking-value'), false, problem);
+  });
+
+  test('init does not echo a second directory', () => {
+    const parsed = parseRunArgs(['init', 'secret-dir', 'other-secret-dir']);
+    assert.equal(parsed.kind, 'init_usage');
+    assert.equal(parsed.kind === 'init_usage' && parsed.problem.includes('secret'), false);
+  });
+
+  test('init --help asks for the help text', () => {
+    assert.deepEqual(parseRunArgs(['init', '--help']), { kind: 'help' });
+  });
+
+  test('init with a directory and --help asks for the help text', () => {
+    assert.deepEqual(parseRunArgs(['init', 'monitoring', '--help']), { kind: 'help' });
+  });
+});
+
 describe('USAGE_LINES', () => {
+  test('names the init command on a line of its own and keeps the run line first', () => {
+    assert.equal(USAGE_LINES[0], 'Usage: blw run [--help] [--version]');
+    assert.ok(USAGE_LINES.includes('       blw init [dir] [--refresh]'));
+    assert.ok(USAGE_LINES.some((line) => line.startsWith('  --refresh') && line.includes('monitor.bat') && line.includes('.gitignore')));
+  });
+
   test('starts with the usage line and lists both options', () => {
     assert.equal(USAGE_LINES[0], 'Usage: blw run [--help] [--version]');
     assert.ok(USAGE_LINES.some((line) => line.includes('--help')));

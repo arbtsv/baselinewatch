@@ -29,7 +29,15 @@ const WARNINGS: RunWarning[] = WARNING_CODES.flatMap((code) => [
   { code, field: 'login' as const, count: 3 },
 ]);
 
-const NEW_CODES = ['lock_taken_over', 'retention_failed', 'secret_too_short', 'binary_left_out', 'zip_skipped', 'zip_failed'] as const;
+const NEW_CODES = [
+  'lock_taken_over',
+  'retention_failed',
+  'secret_too_short',
+  'binary_left_out',
+  'zip_skipped',
+  'zip_failed',
+  'launcher_outdated',
+] as const;
 
 // Every sentence of a catalog rendered for every token: [label, rendered text, expected token].
 function samples(catalog: Catalog): { label: string; text: string; token?: string }[] {
@@ -92,7 +100,7 @@ describe('catalog completeness', () => {
 });
 
 describe('the new warnings', () => {
-  test('the vocabulary holds the six new codes after the earlier three', () => {
+  test('the vocabulary holds the seven new codes after the earlier three', () => {
     assert.deepEqual(WARNING_CODES.slice(3), NEW_CODES);
   });
 
@@ -117,6 +125,45 @@ describe('the new warnings', () => {
     assert.ok(en.warning({ code: 'secret_too_short' }).includes('login or password'));
     assert.ok(en.warning({ code: 'retention_failed' }).includes('?'));
     assert.notEqual(ru.warning({ code: 'secret_too_short', field: 'login' }), ru.warning({ code: 'secret_too_short', field: 'password' }));
+  });
+});
+
+describe('the launcher warning', () => {
+  const FORMS = [
+    { code: 'launcher_outdated', found: 0, expected: 1 },
+    { code: 'launcher_outdated', expected: 1 },
+  ] as const satisfies readonly RunWarning[];
+
+  test('the English sentence names the numbers, the launcher and the command', () => {
+    const [withFound, withoutFound] = FORMS.map((form) => en.warning(form)) as [string, string];
+    for (const needle of ['0', '1', 'monitor.bat', 'npx blw init --refresh']) {
+      assert.ok(withFound.includes(needle), `${needle}: ${withFound}`);
+    }
+    for (const needle of ['1', 'monitor.bat', 'npx blw init --refresh']) {
+      assert.ok(withoutFound.includes(needle), `${needle}: ${withoutFound}`);
+    }
+    assert.ok(!withoutFound.includes('undefined'), withoutFound);
+  });
+
+  test('the Russian sentence is Russian and keeps the launcher and the command as they are', () => {
+    for (const form of FORMS) {
+      const text = ru.warning(form);
+      assert.match(text, CYRILLIC);
+      assert.ok(text.includes('monitor.bat'), text);
+      assert.ok(text.includes('npx blw init --refresh'), text);
+      assert.ok(!text.includes('undefined'), text);
+    }
+  });
+
+  test('no form in either language holds a path separator or a file extension other than .bat', () => {
+    for (const catalog of [en, ru]) {
+      for (const form of [...FORMS, { code: 'launcher_outdated' as const }]) {
+        const text = catalog.warning(form);
+        for (const forbidden of ['/', '\\', '.json', '.log', '.csv', 'undefined']) {
+          assert.ok(!text.includes(forbidden), `${JSON.stringify(forbidden)} in ${text}`);
+        }
+      }
+    }
   });
 });
 

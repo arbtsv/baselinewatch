@@ -98,8 +98,9 @@ export const EXIT_CODES = { pass: 0, fail: 1, notReady: 3 } as const;
  * retention_failed: old run items could not be deleted (count). secret_too_short: the login or the
  * password is too short to hide (field). binary_left_out: files were left out of the zip because
  * they could not be cleaned of the login or the password (count). zip_skipped: the zip is made on Windows only.
- * zip_failed: the zip could not be built. No warning carries a path, a file name or a value, and none
- * changes the exit code or the verdict.
+ * zip_failed: the zip could not be built. launcher_outdated: the monitor.bat of the project carries an
+ * older template version than this core, or none it can read (found, when a number was read, and
+ * expected). No warning carries a path, a file name or a value, and none changes the exit code or the verdict.
  */
 export const WARNING_CODES = [
   'pass_invalid',
@@ -111,6 +112,7 @@ export const WARNING_CODES = [
   'binary_left_out',
   'zip_skipped',
   'zip_failed',
+  'launcher_outdated',
 ] as const;
 export type WarningCode = (typeof WARNING_CODES)[number];
 
@@ -156,6 +158,10 @@ export type RunWarning = {
   node?: string;
   field?: WarningField;
   count?: number;
+  /** launcher_outdated: the template version the launcher carries, when a number could be read. */
+  found?: number;
+  /** launcher_outdated: the template version this core expects. */
+  expected?: number;
 };
 
 /** One project of a pass: its class, what it measured and the best-effort error category. */

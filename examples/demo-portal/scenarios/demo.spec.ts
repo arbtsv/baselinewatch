@@ -1,3 +1,6 @@
+// The demo scenario: it signs in to the invented demo portal and measures three steps.
+// Replace the steps with those of your own portal; every measure() name needs an entry in baselines.json.
+
 import { test, expect } from 'baselinewatch';
 
 test('sign in and open the account pages', async ({ page, account, measure, fillSecret }) => {
